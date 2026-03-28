@@ -5,6 +5,7 @@ torchvision
 timm==0.6.13
 fastapi
 uvicorn[standard]
+python-dotenv
 PyTurboJPEG
 Pillow
 google-genai

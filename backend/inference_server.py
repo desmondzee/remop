@@ -9,6 +9,12 @@ from __future__ import annotations
 import asyncio
 import os
 from io import BytesIO
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load backend/.env so vars work without exporting in the shell (see .env.example).
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 import cv2
 import numpy as np

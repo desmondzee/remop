@@ -20,6 +20,7 @@ cd backend
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+cp .env.example .env   # optional: edit .env for GEMINI_API_KEY, CORS, etc. (loaded on startup; no need to export in the shell)
 # Always use the venv’s interpreter (avoids global uvicorn without torch):
 python -m uvicorn inference_server:app --host 0.0.0.0 --port 8000
 ```
@@ -36,8 +37,9 @@ cd backend && chmod +x serve.sh && ./serve.sh
 - **Frames:** WebSocket `ws://127.0.0.1:8000/ws/infer` — binary **WebP** or **JPEG** (optional leading byte: `0x02` WebP, `0x01` JPEG); response JSON `{ w, h, detections[] }` with normalized boxes and `rel_depth`.
 - **Session:** Append **`?session_id=<uuid>`** (same id the frontend uses) so perception writes per-session **`LATEST_STATE`** for the agent. The browser also sends **`?model=oiv7`** or **`?model=coco`** as before.
 - **Agent (Gemini):** `POST /v1/agent/step?session_id=<uuid>` with an **empty body** — no second image upload. Uses the latest WebP + detections from that session. Optional query params: `goal`, `last_outcome`. Requires **`GEMINI_API_KEY`** on the server. Returns JSON `{ say, actions, state_version }`. **409** if no frames received yet; **429** if throttled or a call is already in flight; **503** if the API key is missing.
+- **Config:** Copy [`backend/.env.example`](backend/.env.example) to **`backend/.env`**. The server loads it automatically from the backend directory (via `python-dotenv`). Shell exports still override `.env` if set.
 - **Agent env:** `GEMINI_AGENT_MODEL` (default `gemini-2.5-flash-lite`), `AGENT_MIN_INTERVAL_MS` (default `500`), `AGENT_IMAGE_MAX_EDGE` (default `512`), `AGENT_WEBP_QUALITY` (default `60`), **`AGENT_DEPTH_SCALE_K`** (static scale for `cz = rel_depth / K` — calibrate once; default `1.0`), optional `AGENT_TOP_N_DETECTIONS`, `AGENT_CLASS_ALLOWLIST` (comma-separated lowercase class names).
-- **CORS:** set `INFERENCE_CORS_ORIGINS` (comma-separated) if the app is not on `localhost:3000`.
+- **CORS:** set `INFERENCE_CORS_ORIGINS` in `.env` (comma-separated) if the app is not on `localhost:3000`.
 - **Model:** The browser sends **`?model=oiv7`** or **`?model=coco`** on the inference WebSocket (see the Detector control in the UI). Weights: **oiv7** → `yolov8n-oiv7.pt` ([Open Images v7](https://docs.ultralytics.com/datasets/detect/open-images-v7/), 601 classes); **coco** → `yolov8n.pt` (MS COCO, 80 classes). Override paths with **`YOLO_MODEL_OIV7`**, **`YOLO_MODEL_COCO`**, or legacy **`YOLO_MODEL`** (same as oiv7 when `YOLO_MODEL_OIV7` is unset). **Objects365** has an official [dataset YAML](https://docs.ultralytics.com/datasets/detect/objects365/) for training, but no published `*-o365.pt` on Ultralytics assets.
 - **MiDaS stride:** `MIDAS_EVERY_N=2` reuses the previous depth map on alternating frames (faster, slightly stale depth).
 
