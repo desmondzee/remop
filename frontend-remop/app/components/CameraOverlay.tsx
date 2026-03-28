@@ -9,7 +9,6 @@ import {
   useRef,
   useState,
 } from "react";
-import type { CSSProperties } from "react";
 import {
   getIsTtsPlaying,
   getOpenaiTtsRotateVoices,
@@ -26,12 +25,16 @@ import {
   type OpenaiTtsVoiceId,
   type TtsEngine,
 } from "../lib/agentTts";
-import { matchTaskAnchorToDetection } from "../lib/taskAnchorMatch";
+import {
+  matchTaskAnchorToDetection,
+  type AnchorMatchableDetection,
+} from "../lib/taskAnchorMatch";
 
 import { AgentRevealText } from "./AgentRevealText";
 import {
   PerceptionPanel,
   type DetectorPresetId,
+  type PerceptionPanelView,
   type SessionTaskLogEntry,
 } from "./PerceptionPanel";
 import { SettingsModal } from "./SettingsModal";
@@ -121,16 +124,6 @@ type InferResponse = {
 };
 
 const HUD_THROTTLE_MS = 100;
-
-/** Stronger Apple Intelligence tint on the agent dock (CSS vars from the glow package). */
-const AGENT_DOCK_GLOW_STYLE = {
-  "--aie-color-1": "#d8b4fe",
-  "--aie-color-2": "#fbcfe8",
-  "--aie-color-3": "#a5b8ff",
-  "--aie-color-4": "#fda4af",
-  "--aie-color-5": "#fcd9a6",
-  "--aie-color-6": "#e9c0ff",
-} as CSSProperties;
 
 /**
  * Human-readable zone name (e.g. "Pacific Time"), not the raw IANA id.
@@ -268,8 +261,6 @@ export default function CameraOverlay() {
   const lastNonSupersedeTtsAtRef = useRef(0);
   const lastHudPushRef = useRef(0);
   const inferMsgCountRef = useRef(0);
-  const agentBoxGlowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const prevAgentEnabledRef = useRef(false);
   const prevSayForAnimRef = useRef<string | null>(null);
   const lastTaskLogSigRef = useRef<string>("");
 
@@ -309,32 +300,32 @@ export default function CameraOverlay() {
   const [depthPreviewUrl, setDepthPreviewUrl] = useState<string | null>(null);
   const [depthPreviewError, setDepthPreviewError] = useState<string | null>(null);
   const [depthFrameSeq, setDepthFrameSeq] = useState(0);
+  const [perceptionPanelView, setPerceptionPanelView] =
+    useState<PerceptionPanelView>("perception");
+  const [failedDepthHttpSrc, setFailedDepthHttpSrc] = useState<string | null>(null);
   const [clockTick, setClockTick] = useState(() => Date.now());
   const [geoLabel, setGeoLabel] = useState(friendlyTimeZoneLabel);
   /** Voice / step agent: off by default after camera engages; press A to run. */
   const [agentEnabled, setAgentEnabled] = useState(false);
-  const [agentBoxGlowPulse, setAgentBoxGlowPulse] = useState(false);
   /** Bumps when `agentSay` is replaced (not extended) so prior line exits upward. */
   const [sayAnimEpoch, setSayAnimEpoch] = useState(0);
   const [sessionTaskLog, setSessionTaskLog] = useState<SessionTaskLogEntry[]>([]);
-
-  const flashAgentBoxGlow = useCallback(() => {
-    if (agentBoxGlowTimerRef.current) {
-      clearTimeout(agentBoxGlowTimerRef.current);
-      agentBoxGlowTimerRef.current = null;
-    }
-    setAgentBoxGlowPulse(true);
-    agentBoxGlowTimerRef.current = setTimeout(() => {
-      setAgentBoxGlowPulse(false);
-      agentBoxGlowTimerRef.current = null;
-    }, 1200);
-  }, []);
+  /** Task-anchor glow: keep last box while fading out (400ms) to mask detection jitter. */
+  const [anchorGlowDisplay, setAnchorGlowDisplay] = useState<{
+    det: AnchorMatchableDetection;
+    fading: boolean;
+  } | null>(null);
 
   const depthHttpSrc = useMemo(() => {
     if (!streaming || !sessionId || !inferReady) return null;
     const base = inferHttpBaseFromWs(wsUrl);
     return `${base}/v1/depth_preview?session_id=${encodeURIComponent(sessionId)}&v=${depthFrameSeq}`;
   }, [streaming, sessionId, inferReady, wsUrl, depthFrameSeq]);
+
+  const depthImgSrc = useMemo(() => {
+    if (depthHttpSrc && depthHttpSrc !== failedDepthHttpSrc) return depthHttpSrc;
+    return depthPreviewUrl;
+  }, [depthHttpSrc, depthPreviewUrl, failedDepthHttpSrc]);
 
   const clockParts = useMemo(() => {
     const d = new Date(clockTick);
@@ -426,17 +417,6 @@ export default function CameraOverlay() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [settingsModalOpen]);
-
-  useEffect(() => {
-    if (!streaming) {
-      prevAgentEnabledRef.current = agentEnabled;
-      return;
-    }
-    if (agentEnabled && !prevAgentEnabledRef.current) {
-      flashAgentBoxGlow();
-    }
-    prevAgentEnabledRef.current = agentEnabled;
-  }, [agentEnabled, streaming, flashAgentBoxGlow]);
 
   useEffect(() => {
     const s = agentSay;
@@ -710,6 +690,8 @@ export default function CameraOverlay() {
     setDepthPreviewUrl(null);
     setDepthPreviewError(null);
     setDepthFrameSeq(0);
+    setFailedDepthHttpSrc(null);
+    setPerceptionPanelView("perception");
     clearReconnect();
     busyRef.current = false;
     cancelAnimationFrame(rafRef.current);
@@ -1015,15 +997,6 @@ export default function CameraOverlay() {
 
   useEffect(() => () => stopCamera(), [stopCamera]);
 
-  useEffect(() => {
-    return () => {
-      if (agentBoxGlowTimerRef.current) {
-        clearTimeout(agentBoxGlowTimerRef.current);
-        agentBoxGlowTimerRef.current = null;
-      }
-    };
-  }, []);
-
   const detections = hudFrame?.detections ?? [];
   const taskAnchorMatch = useMemo(
     () =>
@@ -1032,6 +1005,27 @@ export default function CameraOverlay() {
         : null,
     [agentTaskAnchor, detections]
   );
+
+  useEffect(() => {
+    if (taskAnchorMatch) {
+      setAnchorGlowDisplay({ det: taskAnchorMatch, fading: false });
+      return;
+    }
+    setAnchorGlowDisplay((prev) => (prev ? { ...prev, fading: true } : null));
+  }, [taskAnchorMatch]);
+
+  useEffect(() => {
+    if (!anchorGlowDisplay?.fading) return;
+    const t = window.setTimeout(() => setAnchorGlowDisplay(null), 400);
+    return () => clearTimeout(t);
+  }, [anchorGlowDisplay?.fading]);
+
+  useEffect(() => {
+    if (!streaming || !agentEnabled) {
+      setAnchorGlowDisplay(null);
+    }
+  }, [streaming, agentEnabled]);
+
   const sortedByDepth = [...detections].sort((a, b) => a.rel_depth - b.rel_depth);
   const closest = sortedByDepth[0];
   const focusPerceptionTrack = useMemo(() => {
@@ -1067,30 +1061,56 @@ export default function CameraOverlay() {
             playsInline
             muted
           />
+          {perceptionPanelView === "depth" && depthImgSrc ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={depthImgSrc}
+              alt=""
+              aria-hidden
+              decoding="async"
+              className="pointer-events-none absolute inset-0 z-[1] h-full w-full min-h-0 object-cover"
+              onError={() => {
+                if (depthHttpSrc) setFailedDepthHttpSrc(depthHttpSrc);
+              }}
+            />
+          ) : null}
           <canvas
             ref={overlayRef}
-            className="pointer-events-none absolute inset-0 z-[1] h-full w-full min-h-0"
+            className="pointer-events-none absolute inset-0 z-[2] h-full w-full min-h-0"
           />
-          {streaming && agentEnabled && taskAnchorMatch ? (
-            <AppleIntelligenceGlow
-              isActive
-              state="focus"
-              radius="1rem"
-              className="pointer-events-none absolute z-[3] box-border min-h-[2.5rem] min-w-[2.5rem] overflow-hidden rounded-2xl"
-              style={{
-                left: `${taskAnchorMatch.x1 * 100}%`,
-                top: `${taskAnchorMatch.y1 * 100}%`,
-                width: `${(taskAnchorMatch.x2 - taskAnchorMatch.x1) * 100}%`,
-                height: `${(taskAnchorMatch.y2 - taskAnchorMatch.y1) * 100}%`,
+          {streaming && agentEnabled && anchorGlowDisplay ? (
+            <motion.div
+              className="pointer-events-none absolute z-[3] box-border min-h-[2.5rem] min-w-[2.5rem]"
+              initial={false}
+              animate={{
+                left: `${anchorGlowDisplay.det.x1 * 100}%`,
+                top: `${anchorGlowDisplay.det.y1 * 100}%`,
+                width: `${(anchorGlowDisplay.det.x2 - anchorGlowDisplay.det.x1) * 100}%`,
+                height: `${(anchorGlowDisplay.det.y2 - anchorGlowDisplay.det.y1) * 100}%`,
+                opacity: anchorGlowDisplay.fading ? 0 : 1,
+              }}
+              transition={{
+                left: { type: "spring", stiffness: 220, damping: 28, mass: 0.55 },
+                top: { type: "spring", stiffness: 220, damping: 28, mass: 0.55 },
+                width: { type: "spring", stiffness: 220, damping: 28, mass: 0.55 },
+                height: { type: "spring", stiffness: 220, damping: 28, mass: 0.55 },
+                opacity: {
+                  duration: anchorGlowDisplay.fading ? 0.4 : 0.14,
+                  ease: [0.22, 1, 0.36, 1],
+                },
               }}
             >
-              <div
-                className="h-full w-full min-h-[inherit] min-w-[inherit] rounded-2xl"
-                aria-hidden
-              />
-            </AppleIntelligenceGlow>
+              <AppleIntelligenceGlow
+                isActive
+                state="focus"
+                radius="1rem"
+                className="h-full w-full overflow-hidden rounded-2xl"
+              >
+                <div className="h-full w-full rounded-2xl" aria-hidden />
+              </AppleIntelligenceGlow>
+            </motion.div>
           ) : null}
-          <div className="pointer-events-none absolute inset-0 z-[1] bg-gradient-to-t from-black/45 via-transparent to-black/15" />
+          <div className="pointer-events-none absolute inset-0 z-[2] bg-gradient-to-t from-black/45 via-transparent to-black/15" />
 
           <TwinBrandHud
             weekday={clockParts.weekday}
@@ -1124,16 +1144,17 @@ export default function CameraOverlay() {
                   id="perception-panel"
                   className="pointer-events-auto flex max-h-[min(40vh,300px)] min-h-0 w-[min(300px,92vw)] flex-col sm:max-h-[min(46vh,380px)] lg:max-h-full lg:w-[min(300px,32vw)]"
                 >
-                  <PerceptionPanel
-                    focusTarget={focusPerceptionTrack}
-                    focusFromAnchor={focusFromAnchor}
-                    sessionTaskLog={sessionTaskLog}
-                    depthToAccent={depthToAccent}
-                    depthHttpSrc={depthHttpSrc}
-                    depthPreviewUrl={depthPreviewUrl}
-                    depthPreviewError={depthPreviewError}
-                    streaming={streaming}
-                  />
+                <PerceptionPanel
+                  panelView={perceptionPanelView}
+                  onPanelViewChange={setPerceptionPanelView}
+                  depthImgSrc={depthImgSrc}
+                  focusTarget={focusPerceptionTrack}
+                  focusFromAnchor={focusFromAnchor}
+                  sessionTaskLog={sessionTaskLog}
+                  depthToAccent={depthToAccent}
+                  depthPreviewError={depthPreviewError}
+                  streaming={streaming}
+                />
                 </aside>
               </div>
             </div>
@@ -1158,28 +1179,22 @@ export default function CameraOverlay() {
                     damping: 28,
                     mass: 0.92,
                   }}
-                  className="pointer-events-none absolute inset-x-0 bottom-0 z-[35] flex justify-center px-3 sm:px-4"
+                  className="pointer-events-none absolute inset-x-0 bottom-0 z-[42] flex justify-center overflow-visible px-3 sm:px-4"
                   style={{
                     paddingBottom:
                       "max(3.25rem, calc(env(safe-area-inset-bottom, 0px) + 2.75rem))",
                   }}
                 >
-                  <AppleIntelligenceGlow
-                    isActive
-                    state={agentBoxGlowPulse ? "thinking" : "focus"}
-                    radius="1.35rem"
-                    className="pointer-events-auto !block w-full min-w-0 max-w-xl overflow-hidden sm:max-w-2xl"
-                    style={AGENT_DOCK_GLOW_STYLE}
-                  >
+                  <div className="pointer-events-auto relative w-full min-w-0 max-w-xl sm:max-w-2xl">
                     <motion.div
                       layout
                       transition={{
                         type: "spring",
-                        stiffness: 320,
-                        damping: 30,
-                        mass: 0.85,
+                        stiffness: 300,
+                        damping: 28,
+                        mass: 0.88,
                       }}
-                      className="glass-panel max-h-[min(38vh,320px)] w-full overflow-y-auto overscroll-contain px-4 py-3.5 sm:px-5 sm:py-4"
+                      className="glass-panel relative z-[1] max-h-[min(38vh,320px)] w-full overflow-y-auto overscroll-contain rounded-[1.25rem] px-4 py-3.5 sm:px-5 sm:py-4"
                       style={{ willChange: "transform" }}
                     >
                       <motion.h2
@@ -1304,7 +1319,13 @@ export default function CameraOverlay() {
                         ) : null}
                       </AnimatePresence>
                     </motion.div>
-                  </AppleIntelligenceGlow>
+                    <div
+                      className="agent-dock-orbit-stack z-[2] rounded-[1.25rem]"
+                      aria-hidden
+                    >
+                      <div className="agent-dock-orbit-rotator" />
+                    </div>
+                  </div>
                 </motion.div>
               ) : (
                 <motion.div
@@ -1324,7 +1345,7 @@ export default function CameraOverlay() {
                     damping: 30,
                     mass: 0.88,
                   }}
-                  className="pointer-events-none absolute inset-x-0 bottom-0 z-[35] flex justify-center px-3 sm:px-4"
+                  className="pointer-events-none absolute inset-x-0 bottom-0 z-[42] flex justify-center px-3 sm:px-4"
                   style={{
                     paddingBottom:
                       "max(3.25rem, calc(env(safe-area-inset-bottom, 0px) + 2.75rem))",

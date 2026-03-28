@@ -294,6 +294,119 @@ input.settings-field {
   opacity: 0.35;
 }
 
+/**
+ * Agent log border: comet blob + soft tail orbits in 1s, then hidden 2s (3s loop).
+ * Rotator sits above the glass panel (z-index stack in component).
+ */
+@keyframes agent-dock-orbit-cycle {
+  0% {
+    transform: rotate(0deg);
+    opacity: 1;
+  }
+  33.333% {
+    transform: rotate(360deg);
+    opacity: 1;
+  }
+  33.334%,
+  99.999% {
+    transform: rotate(360deg);
+    opacity: 0;
+  }
+  100% {
+    transform: rotate(0deg);
+    opacity: 0;
+  }
+}
+
+.agent-dock-orbit-stack {
+  position: absolute;
+  inset: 0;
+  border-radius: 1.25rem;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.agent-dock-orbit-rotator {
+  position: absolute;
+  left: -5px;
+  top: -5px;
+  right: -5px;
+  bottom: -5px;
+  border-radius: 1.4rem;
+  animation: agent-dock-orbit-cycle 3s linear infinite;
+  will-change: transform, opacity;
+}
+
+.agent-dock-orbit-rotator::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 2.5px;
+  background: conic-gradient(
+    from 0deg at 50% 50%,
+    transparent 0deg,
+    transparent 268deg,
+    rgba(200, 175, 255, 0.25) 278deg,
+    rgba(150, 200, 255, 0.55) 288deg,
+    rgba(120, 185, 255, 0.95) 294deg,
+    rgba(255, 195, 235, 0.88) 299deg,
+    rgba(220, 175, 255, 0.4) 306deg,
+    rgba(200, 175, 255, 0.12) 314deg,
+    transparent 322deg,
+    transparent 360deg
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  filter: blur(0.4px);
+  box-shadow: 0 0 14px rgba(160, 195, 255, 0.25);
+}
+
+.agent-dock-orbit-rotator::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: inherit;
+  padding: 5px;
+  background: conic-gradient(
+    from 0deg at 50% 50%,
+    transparent 0deg,
+    transparent 268deg,
+    rgba(200, 175, 255, 0.15) 282deg,
+    rgba(140, 190, 255, 0.35) 292deg,
+    rgba(255, 200, 240, 0.4) 299deg,
+    transparent 318deg,
+    transparent 360deg
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  filter: blur(9px);
+  opacity: 0.75;
+  z-index: -1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-dock-orbit-rotator {
+    animation: none;
+    opacity: 0.25;
+  }
+  .agent-dock-orbit-rotator::after {
+    display: none;
+  }
+}
+
 .mono-caps {
   font-family: var(--font-geist-mono), ui-monospace, monospace;
   font-size: 0.65rem;

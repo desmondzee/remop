@@ -81,37 +81,34 @@ def sanitize_depth_for_display(depth: np.ndarray) -> np.ndarray:
 _DEPTH_PREVIEW_ERROR_MAX = 200
 
 
-def depth_raw_grayscale_jpeg_b64(
+def depth_colormap_jpeg_b64(
     depth: np.ndarray,
     *,
     max_side: int = 320,
     jpeg_quality: int = 72,
 ) -> str:
-    """Linear grayscale MiDaS map (per-frame min–max) as small JPEG, base64."""
+    """MiDaS depth as Inferno false-color JPEG (per-frame min–max), base64."""
     d = sanitize_depth_for_display(depth)
-    dmin, dmax = float(d.min()), float(d.max())
-    if dmax - dmin < 1e-8:
-        gray = np.full(d.shape, 128, dtype=np.uint8)
-    else:
-        gray = ((d - dmin) / (dmax - dmin) * 255.0).astype(np.uint8)
-    gray = np.ascontiguousarray(gray)
-    hh, ww = gray.shape[:2]
+    bgr = depth_to_colormap_bgr(d)
+    bgr = np.ascontiguousarray(bgr)
+    hh, ww = bgr.shape[:2]
     side = max(ww, hh)
     if side > max_side:
         scale = max_side / side
         nw = max(1, int(ww * scale))
         nh = max(1, int(hh * scale))
-        gray = cv2.resize(gray, (nw, nh), interpolation=cv2.INTER_AREA)
-        gray = np.ascontiguousarray(gray)
+        bgr = cv2.resize(bgr, (nw, nh), interpolation=cv2.INTER_AREA)
+        bgr = np.ascontiguousarray(bgr)
     q = max(1, min(100, int(jpeg_quality)))
     ok, buf = cv2.imencode(
         ".jpg",
-        gray,
+        bgr,
         [int(cv2.IMWRITE_JPEG_QUALITY), q],
     )
     if ok and buf is not None and buf.size > 0:
         return base64.b64encode(buf.tobytes()).decode("ascii")
-    pil = Image.fromarray(gray, mode="L")
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    pil = Image.fromarray(rgb, mode="RGB")
     bio = io.BytesIO()
     pil.save(bio, format="JPEG", quality=q, optimize=True)
     return base64.b64encode(bio.getvalue()).decode("ascii")
@@ -128,7 +125,7 @@ def _detections_payload(result, depth: np.ndarray, w: int, h: int) -> dict[str, 
     d_safe = sanitize_depth_for_display(depth)
     if _depth_preview_enabled():
         try:
-            b64 = depth_raw_grayscale_jpeg_b64(d_safe)
+            b64 = depth_colormap_jpeg_b64(d_safe)
             if b64.strip():
                 payload["depth_jpeg_b64"] = b64
         except Exception as e:
