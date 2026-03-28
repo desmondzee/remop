@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.*
+
+# Next.js (frontend-remop)
+frontend-remop/.next/
+frontend-remop/out/
+frontend-remop/.vercel
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+backend/.venv/
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Ultralytics / local ML config (often written under cwd)
+backend/Ultralytics/
+runs/
+*.pt
+*.onnx
+*.engine
+
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Testing / coverage
+.coverage
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.tox/
+
+# Logs and debug
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE (user-specific; remove if you commit shared settings)
+.idea/

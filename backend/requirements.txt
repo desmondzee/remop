@@ -1,0 +1,5 @@
+ultralytics
+opencv-python
+torch
+torchvision
+timm==0.6.13
