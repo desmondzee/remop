@@ -22,16 +22,18 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
+from agent_attention import prioritize_grounded_for_model
 from agent_gemini import format_action_label, run_agent
+from agent_tools import action_to_api_dict
 from perception_postprocess import postprocess_frame_for_agent
 from vision_pipeline import VisionPipeline, pick_device
 from world_state import (
-    append_recent_actions,
     copy_snapshot,
     finish_agent_work,
-    get_recent_actions,
+    get_memory_for_prompt,
     publish_latest,
     try_begin_agent_work,
+    update_memory_after_agent_success,
 )
 
 try:
@@ -174,26 +176,45 @@ async def agent_step(
             detail="GEMINI_API_KEY is not configured on the server.",
         )
 
-    recent = await get_recent_actions(sid)
+    memory = await get_memory_for_prompt(sid)
+    effective_anchor = str(memory.get("task_anchor") or "")
+    grounded_for_model = prioritize_grounded_for_model(snap.grounded, effective_anchor)
+    recent = list(memory.get("recent_action_labels") or [])
+    sec_since = memory.get("seconds_since_last_step")
+    if sec_since is not None and not isinstance(sec_since, (int, float)):
+        sec_since = None
+    last_issued = list(memory.get("last_issued_action_labels") or [])
+    turn_excerpt = str(memory.get("turn_log_excerpt") or "")
+
     try:
         result = await run_agent(
             snap.frame_webp,
-            snap.grounded,
+            grounded_for_model,
             recent_actions=recent,
             goal=goal,
             last_outcome=last_outcome,
+            task_anchor=effective_anchor,
+            turn_log_excerpt=turn_excerpt,
+            seconds_since_last_step=sec_since,
+            last_issued_action_labels=last_issued,
         )
     except Exception as e:
         await finish_agent_work(sid, success=False)
         raise HTTPException(status_code=502, detail=f"Gemini error: {e}") from e
 
     labels = [format_action_label(a) for a in result.actions]
-    await append_recent_actions(sid, labels)
+    stored_anchor = await update_memory_after_agent_success(
+        sid,
+        say=result.say,
+        action_labels=labels,
+        task_anchor_model=result.task_anchor or "",
+    )
     await finish_agent_work(sid, success=True)
     return {
         "say": result.say,
-        "actions": [a.model_dump() for a in result.actions],
+        "actions": [action_to_api_dict(a) for a in result.actions],
         "state_version": snap.version,
+        "task_anchor": stored_anchor,
     }
 
 
@@ -228,17 +249,19 @@ async def ws_infer(ws: WebSocket) -> None:
                         return
                     continue
 
-            if not await _send_json_safe(ws, out):
-                return
-
             def _cpu() -> tuple[bytes, list]:
                 return postprocess_frame_for_agent(frame, out)
 
+            # Publish LATEST_STATE before notifying the client so POST /v1/agent/step
+            # never races a 409 (client used to infer JSON before publish_latest finished).
             try:
                 webp_bytes, grounded = await loop.run_in_executor(None, _cpu)
                 await publish_latest(sid, webp_bytes, out, grounded)
             except Exception:
                 pass
+
+            if not await _send_json_safe(ws, out):
+                return
     except WebSocketDisconnect:
         return
 

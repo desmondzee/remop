@@ -112,6 +112,9 @@ export default function CameraOverlay() {
   const connectWsRef = useRef<() => void>(() => {});
   const switchingPresetRef = useRef(false);
   const prevDetectorPresetRef = useRef<DetectorPreset>("oiv7");
+  const agentStepInFlightRef = useRef(false);
+  const inferReadyRef = useRef(false);
+  const sessionIdRef = useRef<string | null>(null);
 
   const [streaming, setStreaming] = useState(false);
   const [status, setStatus] = useState("Idle — click Start camera");
@@ -125,6 +128,8 @@ export default function CameraOverlay() {
   const [agentSay, setAgentSay] = useState("");
   const [agentActions, setAgentActions] = useState<AgentAction[]>([]);
   const [agentNote, setAgentNote] = useState("");
+  /** Backend LATEST_STATE exists only after at least one successful infer for this session. */
+  const [inferReady, setInferReady] = useState(false);
 
   const clearReconnect = () => {
     if (reconnectTimerRef.current) {
@@ -188,6 +193,7 @@ export default function CameraOverlay() {
       setStatus("Connecting…");
       ws.onopen = () => {
         reconnectDelayRef.current = 1000;
+        setInferReady(false);
         setStatus("Connected — inferring");
       };
       ws.onmessage = (ev) => {
@@ -196,6 +202,8 @@ export default function CameraOverlay() {
           busyRef.current = false;
           if (data.error) {
             setStatus(`Server: ${data.error}`);
+          } else if (data.w > 0) {
+            setInferReady(true);
           }
           drawDetections(data);
         } catch {
@@ -227,6 +235,14 @@ export default function CameraOverlay() {
   useEffect(() => {
     connectWsRef.current = connectWs;
   }, [connectWs]);
+
+  useEffect(() => {
+    inferReadyRef.current = inferReady;
+  }, [inferReady]);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
 
   useEffect(() => {
     if (!streaming) {
@@ -275,6 +291,7 @@ export default function CameraOverlay() {
     setAgentSay("");
     setAgentActions([]);
     setAgentNote("");
+    setInferReady(false);
     clearReconnect();
     busyRef.current = false;
     cancelAnimationFrame(rafRef.current);
@@ -407,15 +424,29 @@ export default function CameraOverlay() {
   }, [streaming, tick]);
 
   useEffect(() => {
-    if (!streaming || !sessionId) return;
+    if (!streaming || !sessionId || !inferReady) return;
     const base = (
       process.env.NEXT_PUBLIC_AGENT_HTTP_URL ?? inferHttpBaseFromWs(wsUrl)
     ).replace(/\/$/, "");
-    const poll = async () => {
-      if (!streamingRef.current || !sessionId) return;
+    const gapMs = 750;
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    const stepOnce = async () => {
+      if (cancelled || !streamingRef.current) return;
+      const sid = sessionIdRef.current;
+      if (!sid || !inferReadyRef.current) {
+        timeoutId = window.setTimeout(stepOnce, 200);
+        return;
+      }
+      if (agentStepInFlightRef.current) {
+        timeoutId = window.setTimeout(stepOnce, 100);
+        return;
+      }
+      agentStepInFlightRef.current = true;
       try {
         const r = await fetch(
-          `${base}/v1/agent/step?session_id=${encodeURIComponent(sessionId)}`,
+          `${base}/v1/agent/step?session_id=${encodeURIComponent(sid)}`,
           { method: "POST" }
         );
         const text = await r.text();
@@ -433,6 +464,9 @@ export default function CameraOverlay() {
             "detail" in body
               ? parseFastApiDetail((body as { detail: unknown }).detail)
               : text.slice(0, 160);
+          if (r.status === 429) {
+            return;
+          }
           setAgentNote(`${r.status}: ${detail}`);
           return;
         }
@@ -444,12 +478,20 @@ export default function CameraOverlay() {
         }
       } catch (e) {
         setAgentNote(e instanceof Error ? e.message : String(e));
+      } finally {
+        agentStepInFlightRef.current = false;
+        if (!cancelled) {
+          timeoutId = window.setTimeout(stepOnce, gapMs);
+        }
       }
     };
-    const t = window.setInterval(poll, 700);
-    void poll();
-    return () => clearInterval(t);
-  }, [streaming, sessionId, wsUrl]);
+
+    void stepOnce();
+    return () => {
+      cancelled = true;
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+    };
+  }, [streaming, sessionId, wsUrl, inferReady]);
 
   useEffect(() => {
     const onVis = () => {

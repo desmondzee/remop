@@ -50,6 +50,15 @@ def _sector_thresholds() -> tuple[float, float, float, float]:
     return lx, rx, uy, ly
 
 
+def _min_detection_conf() -> float:
+    raw = os.environ.get("AGENT_DETECTION_MIN_CONF", "0.3").strip()
+    try:
+        v = float(raw)
+    except ValueError:
+        return 0.3
+    return max(0.0, min(1.0, v))
+
+
 def ground_detections_payload(
     payload: dict[str, Any],
     *,
@@ -67,6 +76,8 @@ def ground_detections_payload(
     lx, rx, uy, ly = _sector_thresholds()
 
     dets: list[dict[str, Any]] = list(payload.get("detections") or [])
+    min_cf = _min_detection_conf()
+    dets = [d for d in dets if float(d.get("conf") or 0.0) >= min_cf]
     dets.sort(key=lambda d: float(d.get("conf") or 0.0), reverse=True)
 
     out: list[dict[str, Any]] = []
