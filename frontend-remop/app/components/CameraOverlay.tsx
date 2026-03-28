@@ -120,11 +120,8 @@ export default function CameraOverlay() {
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [devicesLoaded, setDevicesLoaded] = useState(false);
   const [detectorPreset, setDetectorPreset] = useState<DetectorPreset>("oiv7");
-  const [sessionId] = useState(() =>
-    typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID()
-      : `sid-${Date.now()}`
-  );
+  /** Client-only (null on SSR/first paint) so hydration matches; set in useEffect. */
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [agentSay, setAgentSay] = useState("");
   const [agentActions, setAgentActions] = useState<AgentAction[]>([]);
   const [agentNote, setAgentNote] = useState("");
@@ -164,9 +161,17 @@ export default function CameraOverlay() {
     }
   }, []);
 
+  useEffect(() => {
+    const id =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `sid-${Date.now()}`;
+    queueMicrotask(() => setSessionId(id));
+  }, []);
+
   const connectWs = useCallback(() => {
     clearReconnect();
-    if (!streamingRef.current) return;
+    if (!streamingRef.current || !sessionId) return;
     let urlToOpen = wsUrl;
     try {
       const u = new URL(wsUrl);
@@ -321,11 +326,18 @@ export default function CameraOverlay() {
       streamingRef.current = true;
       setStreaming(true);
       setStatus(webpOk ? "Camera on (WebP)" : "Camera on (JPEG fallback)");
-      connectWs();
     } catch (e) {
       setStatus(`Camera failed: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [connectWs, refreshVideoDevices, selectedDeviceId]);
+  }, [refreshVideoDevices, selectedDeviceId]);
+
+  /** Open WebSocket when camera is on and session id is ready (avoids duplicate opens). */
+  useEffect(() => {
+    if (!streaming || !sessionId) return;
+    const st = wsRef.current?.readyState;
+    if (st === WebSocket.OPEN || st === WebSocket.CONNECTING) return;
+    queueMicrotask(() => connectWs());
+  }, [streaming, sessionId, connectWs]);
 
   const tick = useCallback(() => {
     if (document.visibilityState === "hidden") return;
@@ -395,12 +407,12 @@ export default function CameraOverlay() {
   }, [streaming, tick]);
 
   useEffect(() => {
-    if (!streaming) return;
+    if (!streaming || !sessionId) return;
     const base = (
       process.env.NEXT_PUBLIC_AGENT_HTTP_URL ?? inferHttpBaseFromWs(wsUrl)
     ).replace(/\/$/, "");
     const poll = async () => {
-      if (!streamingRef.current) return;
+      if (!streamingRef.current || !sessionId) return;
       try {
         const r = await fetch(
           `${base}/v1/agent/step?session_id=${encodeURIComponent(sessionId)}`,
@@ -471,7 +483,7 @@ export default function CameraOverlay() {
         <button
           type="button"
           onClick={startCamera}
-          disabled={streaming}
+          disabled={streaming || !sessionId}
           className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
         >
           Start camera
@@ -486,7 +498,7 @@ export default function CameraOverlay() {
         </button>
         <span className="text-sm text-zinc-600 dark:text-zinc-400">{status}</span>
         <span className="font-mono text-xs text-zinc-500" title="Sent to /ws/infer and /v1/agent/step">
-          session {sessionId.slice(0, 8)}…
+          {sessionId ? `session ${sessionId.slice(0, 8)}…` : "session …"}
         </span>
       </div>
       <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end">
@@ -548,31 +560,46 @@ export default function CameraOverlay() {
           <code className="font-mono">?model=coco</code> from the Detector control.
         </span>
       </label>
-      {(streaming && (agentSay || agentNote || agentActions.length > 0)) && (
-        <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-sm dark:border-zinc-700 dark:bg-zinc-900/80">
-          <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-            Agent (Gemini)
+      {streaming ? (
+        <div className="rounded-xl border-2 border-emerald-600/50 bg-emerald-50/90 p-4 shadow-sm dark:border-emerald-500/40 dark:bg-emerald-950/50">
+          <p className="text-xs font-semibold uppercase tracking-wide text-emerald-800 dark:text-emerald-300">
+            Follow the agent (temporary UI)
           </p>
           {agentNote ? (
-            <p className="mt-1 text-amber-700 dark:text-amber-400">{agentNote}</p>
+            <p className="mt-2 text-sm text-amber-800 dark:text-amber-300">{agentNote}</p>
           ) : null}
-          {agentSay ? (
-            <p className="mt-1 font-medium text-zinc-900 dark:text-zinc-100">{agentSay}</p>
-          ) : null}
-          {agentActions.length > 0 ? (
-            <ul className="mt-2 list-inside list-disc font-mono text-xs text-zinc-600 dark:text-zinc-400">
-              {agentActions.map((a, i) => (
-                <li key={`${a.name}-${i}`}>
-                  {a.name}
-                  {a.args && Object.keys(a.args).length > 0
-                    ? ` ${JSON.stringify(a.args)}`
-                    : ""}
-                </li>
-              ))}
-            </ul>
-          ) : null}
+          <div className="mt-3">
+            <p className="text-xs font-medium text-emerald-900/80 dark:text-emerald-200/90">
+              Instruction
+            </p>
+            <p className="mt-1 text-lg font-semibold leading-snug text-emerald-950 dark:text-emerald-50">
+              {agentSay || "—"}
+            </p>
+          </div>
+          <div className="mt-4">
+            <p className="text-xs font-medium text-emerald-900/80 dark:text-emerald-200/90">
+              Tool calls
+            </p>
+            {agentActions.length > 0 ? (
+              <ul className="mt-2 space-y-1.5 font-mono text-sm text-emerald-900 dark:text-emerald-100">
+                {agentActions.map((a, i) => (
+                  <li
+                    key={`${a.name}-${i}`}
+                    className="rounded-md bg-white/70 px-2 py-1.5 dark:bg-black/30"
+                  >
+                    <span className="font-semibold">{a.name}</span>
+                    {a.args && Object.keys(a.args).length > 0
+                      ? ` ${JSON.stringify(a.args)}`
+                      : ""}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">—</p>
+            )}
+          </div>
         </div>
-      )}
+      ) : null}
       <div className="relative inline-block max-w-full overflow-hidden rounded-lg border border-zinc-200 bg-black dark:border-zinc-700">
         <video
           ref={videoRef}

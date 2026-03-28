@@ -14,14 +14,33 @@ from agent_tools import ACTION_REGISTRY_PROMPT, AgentResponse
 
 _client: genai.Client | None = None
 
-SYSTEM_INSTRUCTION = f"""You are the planning brain for a human executing tasks in the real world from a first-person camera.
-You see one still frame (WebP) plus a JSON list of grounded objects. Fields use normalized image coordinates cx,cy in [0,1].
+DEFAULT_HIGH_LEVEL_INTENTION = """You are the high-level planner for a household tidying assistant (like a home robot).
+Your ongoing intention is to keep living spaces orderly: notice clutter such as shoes, bottles, clothes, or loose objects on the floor or messy surfaces;
+guide the human to pick items up when it makes sense, pair or group related things (e.g. shoes together), and place them neatly in sensible locations (shelves, bins, tables).
+Work step by step; prefer safe, practical moves the human can actually perform."""
+
+PERCEPTION_AND_SCHEMA_BLOCK = f"""You see one still frame (WebP) plus a JSON list of grounded objects. Fields use normalized image coordinates cx, cy in [0,1].
 cz is a rough step-equivalent forward distance from monocular depth (calibrated constant K), NOT metric LIDAR—use only for ordering near vs far and coarse approach.
 
 {ACTION_REGISTRY_PROMPT}
 
 Output valid JSON only matching the schema: a short say string and a list of actions.
 Be concise. Prefer one clear next step. Safety first."""
+
+
+def _high_level_intention() -> str:
+    raw = os.environ.get("HIGH_LEVEL_INTENTION_PROMPT", "").strip()
+    return raw if raw else DEFAULT_HIGH_LEVEL_INTENTION
+
+
+def _system_instruction() -> str:
+    return (
+        "## Mission\n"
+        + _high_level_intention()
+        + "\n\n## Role and perception\n"
+        "You coordinate a human who is your hands and eyes in the real world from a first-person camera.\n\n"
+        + PERCEPTION_AND_SCHEMA_BLOCK
+    )
 
 
 def _get_client() -> genai.Client:
@@ -82,7 +101,7 @@ def run_agent_sync(
         types.Content(role="user", parts=[image_part, text_part]),
     ]
     config = types.GenerateContentConfig(
-        system_instruction=SYSTEM_INSTRUCTION,
+        system_instruction=_system_instruction(),
         response_mime_type="application/json",
         response_schema=AgentResponse,
         max_output_tokens=_max_output_tokens(),
