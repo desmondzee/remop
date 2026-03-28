@@ -82,9 +82,23 @@ function clearActiveUtterances() {
 // --- Playing flag (POST is_tts_playing) ---
 let isPlayingFlag = false;
 const subscribers = new Set<(v: boolean) => void>();
+const idleSubscribers = new Set<(atMs: number) => void>();
+
+function emitAgentTtsBecameIdle(atMs: number) {
+  idleSubscribers.forEach((cb) => {
+    if (typeof cb === "function") {
+      try {
+        cb(atMs);
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+}
 
 function emitPlaying(v: boolean) {
   if (isPlayingFlag === v) return;
+  const wasPlaying = isPlayingFlag;
   isPlayingFlag = v;
   subscribers.forEach((cb) => {
     if (typeof cb === "function") {
@@ -95,6 +109,9 @@ function emitPlaying(v: boolean) {
       }
     }
   });
+  if (!v && wasPlaying && getTtsQueueDepth() === 0) {
+    emitAgentTtsBecameIdle(Date.now());
+  }
 }
 
 export function getIsTtsPlaying(): boolean {
@@ -105,6 +122,14 @@ export function subscribeTtsPlaying(cb: (v: boolean) => void): () => void {
   subscribers.add(cb);
   cb(isPlayingFlag);
   return () => subscribers.delete(cb);
+}
+
+/** Fires once when playback stops and the instruction queue is empty (both engines). */
+export function subscribeAgentTtsBecameIdle(
+  cb: (atMs: number) => void
+): () => void {
+  idleSubscribers.add(cb);
+  return () => idleSubscribers.delete(cb);
 }
 
 // --- Engine & OpenAI voice ---

@@ -73,6 +73,7 @@ CONTINUITY_AND_ANCHOR_RULES = """
 - The session may have a stored task_anchor (one-line subgoal). In your JSON, task_anchor "" means keep the stored anchor unchanged; the exact token CLEAR clears it for free exploration; any other short string replaces it.
 - When you output a NEW anchor (not CLEAR), you MUST use exact object class names as they appear in the grounded list (field "class"), e.g. if you see cup, write about the cup—not "beverage" or "drink"—so perception filtering stays aligned.
 - If the stored task_anchor refers to an object class that is NOT in the current grounded detection list, do not rely on wait alone. Either re-acquire the scene (look_around, turn, scan) OR set task_anchor to CLEAR and choose a useful next step from what is visible. Do not spin or spam wait for objects you cannot see.
+- The JSON list can include objects from earlier frames in the window; always **verify against the WebP** whether something is still relevant in the current view.
 """
 
 PHYSICAL_EVIDENCE_AND_HOLDING = """
@@ -85,7 +86,11 @@ PHYSICAL_EVIDENCE_AND_HOLDING = """
 - Intent persistence: keep the same primary motor action across ticks until completion, clear failure, or hand/grasp **visible in the WebP** for pick_up—not merely "object vanished from grounding." Do not swap to wait or look_around alone on the very next tick while the human may still be executing the prior step; use wait when motion is settling per cooldown hints.
 """
 
-PERCEPTION_AND_SCHEMA_BLOCK = f"""You see one still frame (WebP) plus a JSON list of grounded objects. The list is from object detection only: it does **not** label hands, grasps, or picked-up state. Infer hand touching or holding the target **only by examining the WebP** with your multimodal vision.
+PERCEPTION_AND_SCHEMA_BLOCK = f"""## Multimodal input (read this carefully)
+You receive **one current still frame** (WebP) and a **separate JSON list** of detector outputs. Treat these as **two different sensors**:
+- **WebP image (primary):** Use your vision on this frame for layout, occlusion, surfaces, clutter, lighting, and **whether the human’s hands are touching or holding something**. The image is the authoritative source for what is *visibly* in front of the camera *right now*.
+- **JSON list (secondary):** Bounding-box class names and coarse positions only. It does **not** show hands, grasps, material, or many small objects; it can be incomplete, noisy, or include stale entries from earlier moments in the accumulation window. **Do not** plan from the JSON alone—cross-check every important claim against the WebP.
+
 Fields use normalized image coordinates cx, cy in [0,1].
 cz is a rough step-equivalent forward distance from monocular depth (calibrated constant K), NOT metric LIDAR—use only for ordering near vs far and coarse approach.
 
@@ -108,7 +113,8 @@ def _system_instruction() -> str:
         "## Mission\n"
         + _high_level_intention()
         + "\n\n## Role and perception\n"
-        "You coordinate a human who is your hands and eyes in the real world from a first-person camera.\n\n"
+        "You coordinate a human who is your hands and eyes in the real world from a first-person camera. "
+        "The WebP frame is the live view—inspect it every turn; the JSON list is a helper, not a substitute for looking.\n\n"
         + CONTINUITY_AND_ANCHOR_RULES
         + "\n"
         + PHYSICAL_EVIDENCE_AND_HOLDING
@@ -160,9 +166,21 @@ def _user_text(
     seconds_since_last_step: float | None,
     last_issued_action_labels: list[str],
     inferred_held_object: str = "",
+    grounded_from_accumulator: bool = False,
 ) -> str:
+    if grounded_from_accumulator:
+        parts0 = [
+            "Grounded objects (JSON array) — **union across all detector passes since your last completed agent step** "
+            "(same approximate class+position keeps highest confidence; capped). "
+            "Reconcile with the WebP; entries may be stale if the scene moved.",
+        ]
+    else:
+        parts0 = [
+            "Grounded objects (JSON array) — **latest vision frame only** (accumulator empty, e.g. first step after engage). "
+            "Still prefer verifying layout and hands in the WebP.",
+        ]
     parts = [
-        "Grounded objects (JSON array):",
+        *parts0,
         json.dumps(grounded, separators=(",", ":")),
     ]
     if task_anchor:
@@ -215,6 +233,7 @@ def _user_text(
         )
     parts.append(
         "Respond with JSON: one physical next step for the human and the matching actions. "
+        "Base your understanding of the **current** scene primarily on **looking at the WebP**; use the JSON as hints only. "
         "thought: one sentence for the operator log if possible, two at most (not spoken). "
         "instruction: only when the human should hear speech this tick—"
         "otherwise leave instruction empty \"\" for silence (no server-derived speech from actions)."
@@ -235,6 +254,7 @@ def run_agent_sync(
     last_issued_action_labels: list[str] | None = None,
     inferred_held_object: str = "",
     session_id: str = "",
+    grounded_from_accumulator: bool = False,
 ) -> AgentResponse:
     client = _get_client()
     last_issued = list(last_issued_action_labels or [])
@@ -248,6 +268,7 @@ def run_agent_sync(
         seconds_since_last_step=seconds_since_last_step,
         last_issued_action_labels=last_issued,
         inferred_held_object=inferred_held_object,
+        grounded_from_accumulator=grounded_from_accumulator,
     )
     image_part = types.Part.from_bytes(data=frame_webp, mime_type="image/webp")
     text_part = types.Part.from_text(text=user)
@@ -276,6 +297,7 @@ def run_agent_sync(
         "seconds_since_last_step": seconds_since_last_step,
         "last_issued_action_labels": last_issued,
         "inferred_held_object": inferred_held_object,
+        "grounded_from_accumulator": grounded_from_accumulator,
         "max_output_tokens": _max_output_tokens(),
     }
     logged = False
@@ -331,6 +353,7 @@ async def run_agent(
     last_issued_action_labels: list[str] | None = None,
     inferred_held_object: str = "",
     session_id: str = "",
+    grounded_from_accumulator: bool = False,
 ) -> AgentResponse:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
@@ -348,6 +371,7 @@ async def run_agent(
             last_issued_action_labels=last_issued_action_labels,
             inferred_held_object=inferred_held_object,
             session_id=session_id,
+            grounded_from_accumulator=grounded_from_accumulator,
         ),
     )
 

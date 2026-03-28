@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent_attention import merge_into_grounded_accumulator
 from agent_tools import Action, action_args_dict
 from voice_gate import VoiceGateResult
 
@@ -48,6 +49,10 @@ def _memory_turns() -> int:
 
 def _memory_max_chars() -> int:
     return max(0, min(20000, int(os.environ.get("AGENT_MEMORY_MAX_CHARS", "2000"))))
+
+
+def _accum_grounded_max_items() -> int:
+    return max(8, min(500, int(os.environ.get("AGENT_ACCUM_GROUNDED_MAX", "96"))))
 
 
 def sanitize_task_anchor_text(model_out: str) -> str:
@@ -93,6 +98,8 @@ class LatestSnapshot:
 @dataclass
 class _SessionBrainState:
     latest: LatestSnapshot | None = None
+    """Union of grounded rows from every vision publish since last successful agent step."""
+    accum_grounded: list[dict[str, Any]] = field(default_factory=list)
     recent_action_labels: list[str] | None = None
     last_agent_ms: float = 0.0
     agent_busy: bool = False
@@ -134,6 +141,23 @@ async def publish_latest(
             grounded=[dict(g) for g in grounded],
             version=ver,
         )
+        # While Gemini is in flight, do not merge: those frames would be cleared on success
+        # without ever being included in a prompt. They still refresh `latest` for the next WebP.
+        if not st.agent_busy:
+            st.accum_grounded = merge_into_grounded_accumulator(
+                st.accum_grounded,
+                grounded,
+                max_items=_accum_grounded_max_items(),
+            )
+
+
+async def get_accumulated_grounded(session_id: str) -> list[dict[str, Any]]:
+    """Shallow copy of detector union since last successful agent step (may be empty)."""
+    async with _lock:
+        st = _sessions.get(session_id)
+        if not st or not st.accum_grounded:
+            return []
+        return [dict(x) for x in st.accum_grounded]
 
 
 async def copy_snapshot(session_id: str) -> LatestSnapshot | None:
@@ -315,6 +339,7 @@ async def update_memory_after_agent_success(
         assert st.recent_action_labels is not None
         st.recent_action_labels.extend(action_labels)
         st.recent_action_labels = st.recent_action_labels[-recent_max:]
+        st.accum_grounded = []
         return st.task_anchor, st.inferred_held_object
 
 

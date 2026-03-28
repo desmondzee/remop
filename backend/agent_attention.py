@@ -55,6 +55,41 @@ def _detection_matches_held(g: dict[str, Any], held_lower: str) -> bool:
     return c == held_lower or held_lower in c or c in held_lower
 
 
+def _ground_merge_key(g: dict[str, Any]) -> tuple[Any, ...]:
+    """Stable key for unioning the same physical object across frames."""
+    c = str(g.get("class", "") or "").strip().lower()
+    try:
+        cx = round(float(g.get("cx", 0.0)), 3)
+        cy = round(float(g.get("cy", 0.0)), 3)
+        cz = round(float(g.get("cz", 0.0)), 3)
+    except (TypeError, ValueError):
+        cx, cy, cz = 0.0, 0.0, 0.0
+    return (c, cx, cy, cz)
+
+
+def merge_into_grounded_accumulator(
+    existing: list[dict[str, Any]],
+    incoming: list[dict[str, Any]],
+    *,
+    max_items: int,
+) -> list[dict[str, Any]]:
+    """
+    Union detector rows across frames: same class + rounded (cx,cy,cz) keeps the
+    highest-confidence row. Then cap length by confidence (retain strongest signal).
+    """
+    best: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for g in existing + incoming:
+        k = _ground_merge_key(g)
+        prev = best.get(k)
+        if prev is None or _conf(g) > _conf(prev):
+            best[k] = dict(g)
+    merged = list(best.values())
+    merged.sort(key=_conf, reverse=True)
+    if max_items > 0 and len(merged) > max_items:
+        merged = merged[:max_items]
+    return merged
+
+
 def _dedupe_preserve_order(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[tuple[Any, ...]] = set()
     out: list[dict[str, Any]] = []

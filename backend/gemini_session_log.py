@@ -1,8 +1,12 @@
-"""Append Gemini request/response records as JSON Lines (one object per line) under backend/logs/."""
+"""Append Gemini request/response records as JSON Lines (one object per line) under backend/logs/.
+
+Disabled when WRITE_GEMINI_SESSION_JSONL is 0/false/no/off (default: on).
+"""
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 from datetime import datetime, timezone
@@ -13,6 +17,11 @@ _LOG_DIR = Path(__file__).resolve().parent / "logs"
 _locks: dict[str, threading.Lock] = {}
 _paths: dict[str, Path] = {}
 _meta_lock = threading.Lock()
+
+
+def _session_jsonl_enabled() -> bool:
+    raw = os.environ.get("WRITE_GEMINI_SESSION_JSONL", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
 
 
 def _safe_session_id(sid: str) -> str:
@@ -30,6 +39,8 @@ def _get_session_lock(sid_key: str) -> threading.Lock:
 
 def append_gemini_log(session_id: str, entry: dict[str, Any]) -> None:
     """Thread-safe append; O(1) per entry (no full-file rewrite)."""
+    if not _session_jsonl_enabled():
+        return
     sid_key = (session_id or "").strip() or "default"
     safe = _safe_session_id(sid_key)
     _LOG_DIR.mkdir(parents=True, exist_ok=True)

@@ -19,6 +19,7 @@ import {
   resumeAudioContextAfterUserGesture,
   setTtsEngine,
   speakInstruction,
+  subscribeAgentTtsBecameIdle,
   subscribeOpenaiTtsStatus,
   subscribeTtsPlaying,
   unlockAudioFromUserGesture,
@@ -30,6 +31,7 @@ import {
   type AnchorMatchableDetection,
 } from "../lib/taskAnchorMatch";
 
+import { AgentDockOrbit } from "./AgentDockOrbit";
 import { AgentRevealText } from "./AgentRevealText";
 import {
   PerceptionPanel,
@@ -82,6 +84,8 @@ type AgentStepOk = {
 
 /** Soft spacing between non-supersede TTS schedules (server also enforces VOICE_MIN_INTERVAL_SEC). */
 const CLIENT_TTS_MIN_GAP_MS = 250;
+/** Re-speak the last tool-step line if the user has heard no TTS for this long (playback idle). */
+const TOOL_REPEAT_SILENCE_MS = 4000;
 
 function parseFastApiDetail(detail: unknown): string {
   if (typeof detail === "string") return detail;
@@ -122,8 +126,6 @@ type InferResponse = {
   depth_jpeg_b64?: string;
   depth_preview_error?: string;
 };
-
-const HUD_THROTTLE_MS = 100;
 
 /**
  * Human-readable zone name (e.g. "Pacific Time"), not the raw IANA id.
@@ -259,10 +261,15 @@ export default function CameraOverlay() {
   const isTtsPlayingRef = useRef(false);
   const ttsPendingTimerRef = useRef<number | null>(null);
   const lastNonSupersedeTtsAtRef = useRef(0);
-  const lastHudPushRef = useRef(0);
+  /** Last successful infer payload; used to redraw overlay after canvas resize (setting w/h clears bitmap). */
+  const latestInferRef = useRef<InferResponse | null>(null);
   const inferMsgCountRef = useRef(0);
   const prevSayForAnimRef = useRef<string | null>(null);
   const lastTaskLogSigRef = useRef<string>("");
+  /** Timestamp from `subscribeAgentTtsBecameIdle` (0 = never idle since agent on). */
+  const lastTtsIdleAtRef = useRef(0);
+  /** Line last spoken for a step that included tool actions (for silence reminder). */
+  const lastToolRelatedTtsLineRef = useRef("");
 
   const [streaming, setStreaming] = useState(false);
   const [status, setStatus] = useState("Standby");
@@ -443,15 +450,6 @@ export default function CameraOverlay() {
     }
   };
 
-  const pushHudThrottled = useCallback((data: InferResponse) => {
-    inferMsgCountRef.current += 1;
-    const now = performance.now();
-    if (now - lastHudPushRef.current >= HUD_THROTTLE_MS) {
-      lastHudPushRef.current = now;
-      setHudFrame(data);
-    }
-  }, []);
-
   const drawDetections = useCallback((data: InferResponse) => {
     const overlay = overlayRef.current;
     const video = videoRef.current;
@@ -510,6 +508,19 @@ export default function CameraOverlay() {
       isTtsPlayingRef.current = v;
     });
   }, []);
+
+  useEffect(() => {
+    return subscribeAgentTtsBecameIdle((t) => {
+      lastTtsIdleAtRef.current = t;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!agentEnabled) {
+      lastTtsIdleAtRef.current = 0;
+      lastToolRelatedTtsLineRef.current = "";
+    }
+  }, [agentEnabled]);
 
   useEffect(() => {
     return subscribeOpenaiTtsStatus(({ status, detail }) => {
@@ -571,9 +582,12 @@ export default function CameraOverlay() {
         try {
           const data = JSON.parse(String(ev.data)) as InferResponse;
           busyRef.current = false;
+          inferMsgCountRef.current += 1;
           if (data.error) {
+            latestInferRef.current = null;
             setStatus(`Server: ${data.error}`);
           } else if (data.w > 0) {
+            latestInferRef.current = data;
             setInferReady(true);
             setDepthFrameSeq((n) => n + 1);
           }
@@ -586,7 +600,8 @@ export default function CameraOverlay() {
             setDepthPreviewError(err || null);
           }
           drawDetections(data);
-          pushHudThrottled(data);
+          // Keep HUD / object count in sync with every server frame (no throttle).
+          setHudFrame(data);
         } catch {
           busyRef.current = false;
         }
@@ -613,7 +628,7 @@ export default function CameraOverlay() {
     } catch {
       setStatus("Invalid stream URL");
     }
-  }, [wsUrl, detectorPreset, sessionId, drawDetections, pushHudThrottled]);
+  }, [wsUrl, detectorPreset, sessionId, drawDetections]);
 
   useEffect(() => {
     connectWsRef.current = connectWs;
@@ -685,6 +700,7 @@ export default function CameraOverlay() {
     resetAgentTts();
     setTtsQueueLen(0);
     setHudFrame(null);
+    latestInferRef.current = null;
     setWsConnected(false);
     setWsConnecting(false);
     setDepthPreviewUrl(null);
@@ -921,9 +937,13 @@ export default function CameraOverlay() {
               ? v
               : null
           );
+          let spokeThisStep = false;
           if (v && typeof v.speak === "string" && v.should_speak) {
             const line = v.speak.trim();
             if (line) {
+              if (rawActions.length > 0) {
+                lastToolRelatedTtsLineRef.current = line;
+              }
               if (ttsPendingTimerRef.current) {
                 window.clearTimeout(ttsPendingTimerRef.current);
                 ttsPendingTimerRef.current = null;
@@ -946,6 +966,36 @@ export default function CameraOverlay() {
                   flush();
                 }, delay);
               }
+              spokeThisStep = true;
+            }
+          }
+          if (
+            !spokeThisStep &&
+            lastToolRelatedTtsLineRef.current &&
+            !getIsTtsPlaying() &&
+            getTtsQueueDepth() === 0 &&
+            lastTtsIdleAtRef.current > 0 &&
+            Date.now() - lastTtsIdleAtRef.current >= TOOL_REPEAT_SILENCE_MS
+          ) {
+            const reminder = lastToolRelatedTtsLineRef.current;
+            if (ttsPendingTimerRef.current) {
+              window.clearTimeout(ttsPendingTimerRef.current);
+              ttsPendingTimerRef.current = null;
+            }
+            const elapsedGap = Date.now() - lastNonSupersedeTtsAtRef.current;
+            const delay = Math.max(0, CLIENT_TTS_MIN_GAP_MS - elapsedGap);
+            const flushReminder = () => {
+              speakInstruction(reminder, { supersede: false });
+              setTtsQueueLen(getTtsQueueDepth());
+              lastNonSupersedeTtsAtRef.current = Date.now();
+            };
+            if (delay === 0) {
+              flushReminder();
+            } else {
+              ttsPendingTimerRef.current = window.setTimeout(() => {
+                ttsPendingTimerRef.current = null;
+                flushReminder();
+              }, delay);
             }
           }
           setAgentNote("");
@@ -985,15 +1035,23 @@ export default function CameraOverlay() {
     const video = videoRef.current;
     const overlay = overlayRef.current;
     if (!video || !overlay) return;
-    const ro = new ResizeObserver(() => {
-      overlay.width = video.clientWidth;
-      overlay.height = video.clientHeight;
-    });
+    const applySizeAndRedraw = () => {
+      const vw = video.clientWidth;
+      const vh = video.clientHeight;
+      if (vw <= 0 || vh <= 0) return;
+      if (overlay.width === vw && overlay.height === vh) return;
+      overlay.width = vw;
+      overlay.height = vh;
+      const snap = latestInferRef.current;
+      if (snap && !snap.error && snap.w > 0) {
+        drawDetections(snap);
+      }
+    };
+    const ro = new ResizeObserver(applySizeAndRedraw);
     ro.observe(video);
-    overlay.width = video.clientWidth;
-    overlay.height = video.clientHeight;
+    applySizeAndRedraw();
     return () => ro.disconnect();
-  }, [streaming]);
+  }, [streaming, drawDetections]);
 
   useEffect(() => () => stopCamera(), [stopCamera]);
 
@@ -1104,7 +1162,7 @@ export default function CameraOverlay() {
                 isActive
                 state="focus"
                 radius="1rem"
-                className="h-full w-full overflow-hidden rounded-2xl"
+                className="remop-anchor-aie h-full w-full overflow-hidden rounded-2xl"
               >
                 <div className="h-full w-full rounded-2xl" aria-hidden />
               </AppleIntelligenceGlow>
@@ -1179,13 +1237,13 @@ export default function CameraOverlay() {
                     damping: 28,
                     mass: 0.92,
                   }}
-                  className="pointer-events-none absolute inset-x-0 bottom-0 z-[42] flex justify-center overflow-visible px-3 sm:px-4"
+                  className="pointer-events-none absolute inset-x-0 bottom-0 z-[100] flex justify-center overflow-visible px-3 sm:px-4"
                   style={{
                     paddingBottom:
                       "max(3.25rem, calc(env(safe-area-inset-bottom, 0px) + 2.75rem))",
                   }}
                 >
-                  <div className="pointer-events-auto relative w-full min-w-0 max-w-xl sm:max-w-2xl">
+                  <div className="pointer-events-auto relative isolate w-full min-w-0 max-w-xl sm:max-w-2xl">
                     <motion.div
                       layout
                       transition={{
@@ -1320,10 +1378,10 @@ export default function CameraOverlay() {
                       </AnimatePresence>
                     </motion.div>
                     <div
-                      className="agent-dock-orbit-stack z-[2] rounded-[1.25rem]"
+                      className="pointer-events-none absolute inset-0 z-[60] overflow-visible rounded-[1.25rem]"
                       aria-hidden
                     >
-                      <div className="agent-dock-orbit-rotator" />
+                      <AgentDockOrbit />
                     </div>
                   </div>
                 </motion.div>
@@ -1345,7 +1403,7 @@ export default function CameraOverlay() {
                     damping: 30,
                     mass: 0.88,
                   }}
-                  className="pointer-events-none absolute inset-x-0 bottom-0 z-[42] flex justify-center px-3 sm:px-4"
+                  className="pointer-events-none absolute inset-x-0 bottom-0 z-[100] flex justify-center px-3 sm:px-4"
                   style={{
                     paddingBottom:
                       "max(3.25rem, calc(env(safe-area-inset-bottom, 0px) + 2.75rem))",

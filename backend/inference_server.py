@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import os
 from io import BytesIO
 from pathlib import Path
@@ -36,6 +37,7 @@ from world_state import (
     commit_voice_gate_result,
     copy_snapshot,
     finish_agent_work,
+    get_accumulated_grounded,
     get_memory_for_prompt,
     publish_latest,
     try_begin_agent_work,
@@ -51,6 +53,13 @@ except Exception:
 
 JPEG_SOI = b"\xff\xd8"
 WEBP_MARKER = b"WEBP"
+
+_log = logging.getLogger(__name__)
+
+
+def _ws_infer_log_det_count_enabled() -> bool:
+    raw = os.environ.get("WS_INFER_LOG_DET_COUNT", "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 FMT_JPEG = 1
 FMT_WEBP = 2
@@ -229,8 +238,11 @@ async def agent_step(
     memory = await get_memory_for_prompt(sid)
     effective_anchor = str(memory.get("task_anchor") or "")
     inferred_held = str(memory.get("inferred_held_object") or "")
+    accum = await get_accumulated_grounded(sid)
+    grounded_union = accum if accum else list(snap.grounded)
+    grounded_from_accumulator = bool(accum)
     grounded_for_model = prioritize_grounded_for_model(
-        snap.grounded,
+        grounded_union,
         effective_anchor,
         inferred_held_object=inferred_held,
     )
@@ -257,6 +269,7 @@ async def agent_step(
             last_issued_action_labels=last_issued,
             inferred_held_object=inferred_held,
             session_id=sid,
+            grounded_from_accumulator=grounded_from_accumulator,
         )
     except Exception as e:
         await finish_agent_work(sid, success=False)
@@ -340,11 +353,31 @@ async def ws_infer(ws: WebSocket) -> None:
 
             # Publish LATEST_STATE before notifying the client so POST /v1/agent/step
             # never races a 409 (client used to infer JSON before publish_latest finished).
+            grounded_len: int | None = None
             try:
                 webp_bytes, grounded = await loop.run_in_executor(VISION, _cpu)
                 await publish_latest(sid, webp_bytes, out, grounded)
+                grounded_len = len(grounded)
             except Exception:
                 pass
+
+            if _ws_infer_log_det_count_enabled():
+                n_ws = len(out.get("detections") or [])
+                if grounded_len is None:
+                    _log.info(
+                        "ws infer session=%s preset=%s websocket_dets=%d grounded_for_agent=postprocess_failed",
+                        sid,
+                        model_preset,
+                        n_ws,
+                    )
+                else:
+                    _log.info(
+                        "ws infer session=%s preset=%s websocket_dets=%d grounded_for_agent=%d",
+                        sid,
+                        model_preset,
+                        n_ws,
+                        grounded_len,
+                    )
 
             if not await _send_json_safe(ws, out):
                 return

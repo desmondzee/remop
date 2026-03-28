@@ -295,116 +295,78 @@ input.settings-field {
 }
 
 /**
- * Agent log border: comet blob + soft tail orbits in 1s, then hidden 2s (3s loop).
- * Rotator sits above the glass panel (z-index stack in component).
+ * Agent dock: SVG stroke-dash orbit — linear sweep, separate slow opacity decay.
+ * Avoids mask-composite issues in WebKit/Firefox.
  */
-@keyframes agent-dock-orbit-cycle {
+@keyframes agent-dock-svg-dash {
   0% {
-    transform: rotate(0deg);
-    opacity: 1;
+    stroke-dashoffset: 0;
   }
-  33.333% {
-    transform: rotate(360deg);
-    opacity: 1;
+  30% {
+    stroke-dashoffset: -100;
   }
-  33.334%,
   99.999% {
-    transform: rotate(360deg);
-    opacity: 0;
+    stroke-dashoffset: -100;
   }
   100% {
-    transform: rotate(0deg);
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes agent-dock-svg-fade {
+  0%,
+  28% {
+    opacity: 1;
+  }
+  62% {
+    opacity: 0;
+  }
+  99.999%,
+  100% {
     opacity: 0;
   }
 }
 
-.agent-dock-orbit-stack {
-  position: absolute;
-  inset: 0;
-  border-radius: 1.25rem;
-  pointer-events: none;
-  overflow: visible;
-}
-
-.agent-dock-orbit-rotator {
-  position: absolute;
-  left: -5px;
-  top: -5px;
-  right: -5px;
-  bottom: -5px;
-  border-radius: 1.4rem;
-  animation: agent-dock-orbit-cycle 3s linear infinite;
-  will-change: transform, opacity;
-}
-
-.agent-dock-orbit-rotator::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding: 2.5px;
-  background: conic-gradient(
-    from 0deg at 50% 50%,
-    transparent 0deg,
-    transparent 268deg,
-    rgba(200, 175, 255, 0.25) 278deg,
-    rgba(150, 200, 255, 0.55) 288deg,
-    rgba(120, 185, 255, 0.95) 294deg,
-    rgba(255, 195, 235, 0.88) 299deg,
-    rgba(220, 175, 255, 0.4) 306deg,
-    rgba(200, 175, 255, 0.12) 314deg,
-    transparent 322deg,
-    transparent 360deg
-  );
-  -webkit-mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  mask-composite: exclude;
-  filter: blur(0.4px);
-  box-shadow: 0 0 14px rgba(160, 195, 255, 0.25);
-}
-
-.agent-dock-orbit-rotator::after {
-  content: "";
-  position: absolute;
-  inset: -3px;
-  border-radius: inherit;
-  padding: 5px;
-  background: conic-gradient(
-    from 0deg at 50% 50%,
-    transparent 0deg,
-    transparent 268deg,
-    rgba(200, 175, 255, 0.15) 282deg,
-    rgba(140, 190, 255, 0.35) 292deg,
-    rgba(255, 200, 240, 0.4) 299deg,
-    transparent 318deg,
-    transparent 360deg
-  );
-  -webkit-mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  mask-composite: exclude;
-  filter: blur(9px);
-  opacity: 0.75;
-  z-index: -1;
+.agent-dock-orbit-stroke {
+  animation:
+    agent-dock-svg-dash 3.6s linear infinite,
+    agent-dock-svg-fade 3.6s cubic-bezier(0.33, 0, 0.2, 1) infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .agent-dock-orbit-rotator {
+  .agent-dock-orbit-stroke {
     animation: none;
-    opacity: 0.25;
+    opacity: 0.45;
+    stroke-dashoffset: 0;
   }
-  .agent-dock-orbit-rotator::after {
-    display: none;
-  }
+}
+
+/**
+ * Task-anchor @xuanhe/apple-intelligence-glow-react: darker palette, longer angular tail,
+ * stronger read — animation timing unchanged (library keyframes + state="focus").
+ */
+.remop-anchor-aie .aie-glow-rings {
+  filter: brightness(1.16) saturate(1.06)
+    drop-shadow(0 0 20px rgba(55, 75, 160, 0.42))
+    drop-shadow(0 0 42px rgba(40, 50, 110, 0.28));
+}
+
+.remop-anchor-aie .aie-gradient-ring {
+  background-image: conic-gradient(
+    from var(--aie-angle),
+    rgba(28, 26, 52, 0.52) 0deg,
+    rgba(32, 34, 68, 0.6) 72deg,
+    rgba(40, 44, 88, 0.74) 138deg,
+    rgba(48, 54, 108, 0.84) 188deg,
+    rgba(58, 68, 132, 0.9) 218deg,
+    rgba(72, 86, 158, 0.96) 236deg,
+    rgba(88, 104, 188, 1) 252deg,
+    rgba(76, 92, 168, 0.78) 268deg,
+    rgba(58, 70, 138, 0.52) 296deg,
+    rgba(44, 52, 102, 0.3) 324deg,
+    rgba(32, 34, 72, 0.16) 348deg,
+    rgba(28, 26, 52, 0.52) 360deg
+  ) !important;
 }
 
 .mono-caps {
