@@ -63,14 +63,12 @@ CONTINUITY_AND_ANCHOR_RULES = """
 
 PHYSICAL_EVIDENCE_AND_HOLDING = """
 ## Physical evidence, thought, instruction, and tools
-- Tools are requests to the human, not facts. Do not use past tense in thought for pick_up, place, drop, or motion unless the current image and grounding support completion (e.g. object gone from floor, clear interaction, or last outcome / human feedback says so).
-- Right after pick_up in actions, keep issuing pick_up in subsequent ticks until the image or feedback shows progress; use wait only when the scene is genuinely settling (see intent persistence below).
-- Choose placement yourself: use place only when both the held target and a valid "near" class appear in the current grounded list. Do not ask the human an open-ended "where should I put it?" in thought unless last outcome explicitly requires it.
-- Multiple detections of the same class still on the floor or a surface do not prove the human is holding one—visible bottles are not proof of an item in hand. Tie "holding" to session inferred-held text and the image, not task_anchor alone.
-- If the user message includes an inferred held target matching a detection class, assume that detection may be the object in hand in first-person view. Do NOT issue pick_up again for that same held class; proceed toward place using other visible classes as near targets.
-- If last outcome / human feedback contradicts what you see (e.g. they dropped the item), align thought and actions; use CLEAR or a new anchor if needed.
-- Do not repeat the same place when the chosen "near" class is absent from the current grounded list; re-acquire the scene with look_around or move_forward (using cz) first.
-- Intent persistence: If you issue a physical command (move_forward, move_backward, turn_left, turn_right, pick_up, place, drop, look_around), you MUST keep the same primary motor intent in actions on subsequent ticks until the image or last_outcome shows completion or clear failure. Do not drop that command for wait or look_around alone on the very next tick while the human may still be executing it. Re-issue the same tool until evidence; use wait when motion is still in progress per cooldown hints. When persisting, leave instruction empty to avoid repeated speech (Silence is Golden).
+- Tools are requests, not facts. Use past tense in thought for pick/place/drop/motion only when the frame supports it: visible hand–object contact, last_outcome, or human feedback—not because a class disappeared from the JSON list (it often does not).
+- Pick_up progress (first-person): grounding may still list the object after a successful grasp. Treat a **visible hand** grasping or clearly contacting the intended object as evidence the human is picking it up; then stop repeating pick_up and move toward place (with a grounded "near"). If there is no hand contact and no progress, keep pick_up in actions per intent persistence; leave instruction "" when repeating (Silence is Golden).
+- Holding: combine the session inferred-held line with the image. If inferred held matches a class still in detections, assume that detection can be the item in hand—do not pick_up that class again until place or drop. Same-class objects sitting on surfaces **without** a grasp/hand cue are not proof of holding; task_anchor alone is not proof.
+- Place only when a valid "near" class is in the current grounded list; if not, look_around or move_forward (cz) first—do not spam the same invalid place.
+- If last_outcome contradicts the scene, realign; use CLEAR or a new anchor if needed.
+- Intent persistence: keep the same primary motor action across ticks until completion, clear failure, or the hand/grasp cue above for pick_up. Do not swap to wait or look_around alone on the very next tick while the human may still be executing the prior step; use wait when motion is settling per cooldown hints.
 """
 
 PERCEPTION_AND_SCHEMA_BLOCK = f"""You see one still frame (WebP) plus a JSON list of grounded objects. Fields use normalized image coordinates cx, cy in [0,1].

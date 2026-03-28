@@ -185,7 +185,7 @@ Use "{}" when there are no parameters.
 wait: Hold your position when a physical action is still in progress or the scene is settling (e.g. after motion).
 Do not use wait instead of look_around, turning, or CLEAR when the anchored object is missing from the detection list.
 
-pick_up vs holding: If the session line says you are already inferring a held target and that class still appears in detections, treat that detection as likely the object in hand (first-person view). Do NOT issue another pick_up for that same held class until place or drop has cleared it.
+pick_up vs holding: Detections often keep listing the object after grasp. In first person, a visible hand grasping or contacting that object is the main cue pick_up is succeeding. If the session infers a held target and that class still appears in grounding, treat it as likely in hand—do not pick_up that class again until place or drop.
 
 task_anchor field:
 - "" = keep current session anchor.
