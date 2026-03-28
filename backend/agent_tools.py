@@ -41,8 +41,9 @@ _TASK_ANCHOR_DESC = (
 )
 
 _THOUGHT_DESC = (
-    "Operator dashboard line: status, reasoning, or wait-state copy. NOT read aloud. "
-    "Conversational tone allowed. Do not duplicate the instruction field here unless you have extra context."
+    "Operator / session log only; never read aloud as TTS. "
+    "One short sentence is ideal; at most two sentences. Terse status or reasoning only—no long narration. "
+    "Do not duplicate the instruction field unless you add non-obvious context."
 )
 
 _INSTRUCTION_DESC = (
@@ -175,7 +176,7 @@ Examples:
 - move_backward: args_json "{\\"steps\\":1}"
 - turn_left: args_json "{\\"degrees\\":30}"
 - turn_right: args_json "{\\"degrees\\":30}"
-- pick_up: args_json "{\\"target\\":\\"cup\\",\\"sector\\":\\"left\\"}" — request the human to grasp. "target" MUST match a visible grounded "class" string. If multiple objects share the same class, you MUST include "sector" (left/center/right) copied from the grounded object you mean. This is a request, not confirmation the object is in hand. "sector" does not change the session held-object class (still the same target class).
+- pick_up: args_json "{\\"target\\":\\"cup\\",\\"sector\\":\\"left\\"}" — request the human to grasp. "target" MUST match a visible grounded "class" string. If multiple objects share the same class, you MUST include "sector" (left/center/right) copied from the grounded object you mean. This is a request, not confirmation the object is in hand. On later ticks, the detector still will not label hands—you must **see** hand–object contact in the **WebP image** to infer a successful grasp. "sector" does not change the session held-object class (still the same target class).
 - drop: args_json "{}" — release whatever is held; clears inferred holding state.
 - place: args_json "{\\"target\\":\\"shoe\\",\\"near\\":\\"table\\"}" — put the currently held object near a surface or container. "near" MUST be an exact class string from the current grounded list (e.g. table, bin, shelf), not vague words like "away" or "somewhere". If "near" is NOT in the current grounded list, you CANNOT use place—use look_around or move_forward (per cz) until a valid surface/container appears in the list. Do not repeat the same place when "near" is missing or invalid.
 - look_around: args_json "{}" — rotate in place to scan the room. Do not use this for locomotion.
@@ -185,7 +186,7 @@ Use "{}" when there are no parameters.
 wait: Hold your position when a physical action is still in progress or the scene is settling (e.g. after motion).
 Do not use wait instead of look_around, turning, or CLEAR when the anchored object is missing from the detection list.
 
-pick_up vs holding: Detections often keep listing the object after grasp. In first person, a visible hand grasping or contacting that object is the main cue pick_up is succeeding. If the session infers a held target and that class still appears in grounding, treat it as likely in hand—do not pick_up that class again until place or drop.
+pick_up vs holding: Detections often keep listing the object after grasp, so "still in JSON" is not failure. Hands are **not** in the detection list—the only grasp cue is **your vision on the WebP**: a hand clearly contacting or grasping the intended object after pick_up was requested. If the session infers a held target and that class still appears in grounding, treat it as likely in hand—do not pick_up that class again until place or drop.
 
 task_anchor field:
 - "" = keep current session anchor.
@@ -193,7 +194,7 @@ task_anchor field:
 - Other text = new anchor (use exact class names from grounded objects).
 
 JSON fields:
-- thought: dashboard / operator only (not TTS).
+- thought: operator log only (not TTS); one sentence ideal, two max.
 - instruction: the ONLY line spoken to the human this tick. If empty "", there is no speech—leave empty during wait or when repeating an ongoing motion. When pick_up includes "sector", your instruction must match (e.g. Pick up the bottle on the left).
 """
 

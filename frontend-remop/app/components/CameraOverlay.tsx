@@ -1,6 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AppleIntelligenceGlow } from "@xuanhe/apple-intelligence-glow-react";
+import { AnimatePresence, motion } from "motion/react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type { CSSProperties } from "react";
 import {
   getIsTtsPlaying,
   getOpenaiTtsRotateVoices,
@@ -17,8 +26,14 @@ import {
   type OpenaiTtsVoiceId,
   type TtsEngine,
 } from "../lib/agentTts";
+import { matchTaskAnchorToDetection } from "../lib/taskAnchorMatch";
 
-import { PerceptionPanel, type DetectorPresetId } from "./PerceptionPanel";
+import { AgentRevealText } from "./AgentRevealText";
+import {
+  PerceptionPanel,
+  type DetectorPresetId,
+  type SessionTaskLogEntry,
+} from "./PerceptionPanel";
 import { SettingsModal } from "./SettingsModal";
 import { TwinBrandHud } from "./TwinBrandHud";
 import { TwinStatusBar } from "./TwinStatusBar";
@@ -106,6 +121,16 @@ type InferResponse = {
 };
 
 const HUD_THROTTLE_MS = 100;
+
+/** Stronger Apple Intelligence tint on the agent dock (CSS vars from the glow package). */
+const AGENT_DOCK_GLOW_STYLE = {
+  "--aie-color-1": "#d8b4fe",
+  "--aie-color-2": "#fbcfe8",
+  "--aie-color-3": "#a5b8ff",
+  "--aie-color-4": "#fda4af",
+  "--aie-color-5": "#fcd9a6",
+  "--aie-color-6": "#e9c0ff",
+} as CSSProperties;
 
 /**
  * Human-readable zone name (e.g. "Pacific Time"), not the raw IANA id.
@@ -205,6 +230,20 @@ function defaultVideoDeviceId(devices: MediaDeviceInfo[]): string {
   return v[0]?.deviceId ?? "";
 }
 
+function detectionToPerceptionTrack(d: {
+  label: string;
+  conf: number;
+  rel_depth: number;
+  cx: number;
+}) {
+  return {
+    label: d.label,
+    conf: d.conf,
+    rel_depth: d.rel_depth,
+    cx: d.cx,
+  };
+}
+
 export default function CameraOverlay() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const captureRef = useRef<HTMLCanvasElement>(null);
@@ -229,6 +268,10 @@ export default function CameraOverlay() {
   const lastNonSupersedeTtsAtRef = useRef(0);
   const lastHudPushRef = useRef(0);
   const inferMsgCountRef = useRef(0);
+  const agentBoxGlowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevAgentEnabledRef = useRef(false);
+  const prevSayForAnimRef = useRef<string | null>(null);
+  const lastTaskLogSigRef = useRef<string>("");
 
   const [streaming, setStreaming] = useState(false);
   const [status, setStatus] = useState("Standby");
@@ -268,6 +311,24 @@ export default function CameraOverlay() {
   const [depthFrameSeq, setDepthFrameSeq] = useState(0);
   const [clockTick, setClockTick] = useState(() => Date.now());
   const [geoLabel, setGeoLabel] = useState(friendlyTimeZoneLabel);
+  /** Voice / step agent: off by default after camera engages; press A to run. */
+  const [agentEnabled, setAgentEnabled] = useState(false);
+  const [agentBoxGlowPulse, setAgentBoxGlowPulse] = useState(false);
+  /** Bumps when `agentSay` is replaced (not extended) so prior line exits upward. */
+  const [sayAnimEpoch, setSayAnimEpoch] = useState(0);
+  const [sessionTaskLog, setSessionTaskLog] = useState<SessionTaskLogEntry[]>([]);
+
+  const flashAgentBoxGlow = useCallback(() => {
+    if (agentBoxGlowTimerRef.current) {
+      clearTimeout(agentBoxGlowTimerRef.current);
+      agentBoxGlowTimerRef.current = null;
+    }
+    setAgentBoxGlowPulse(true);
+    agentBoxGlowTimerRef.current = setTimeout(() => {
+      setAgentBoxGlowPulse(false);
+      agentBoxGlowTimerRef.current = null;
+    }, 1200);
+  }, []);
 
   const depthHttpSrc = useMemo(() => {
     if (!streaming || !sessionId || !inferReady) return null;
@@ -334,6 +395,21 @@ export default function CameraOverlay() {
         setSettingsModalOpen((open) => !open);
         return;
       }
+      if (e.key === "a" || e.key === "A") {
+        const el = e.target;
+        if (
+          el instanceof HTMLInputElement ||
+          el instanceof HTMLTextAreaElement ||
+          el instanceof HTMLSelectElement
+        ) {
+          return;
+        }
+        if (el instanceof HTMLElement && el.isContentEditable) return;
+        if (!streamingRef.current) return;
+        e.preventDefault();
+        setAgentEnabled((v) => !v);
+        return;
+      }
       if (e.key !== "/") return;
       const el = e.target;
       if (
@@ -350,6 +426,35 @@ export default function CameraOverlay() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [settingsModalOpen]);
+
+  useEffect(() => {
+    if (!streaming) {
+      prevAgentEnabledRef.current = agentEnabled;
+      return;
+    }
+    if (agentEnabled && !prevAgentEnabledRef.current) {
+      flashAgentBoxGlow();
+    }
+    prevAgentEnabledRef.current = agentEnabled;
+  }, [agentEnabled, streaming, flashAgentBoxGlow]);
+
+  useEffect(() => {
+    const s = agentSay;
+    const prev = prevSayForAnimRef.current;
+    if (s === prev) return;
+
+    if (prev === null && s === "") {
+      prevSayForAnimRef.current = "";
+      return;
+    }
+
+    const extended =
+      typeof prev === "string" && prev.length > 0 && s.startsWith(prev);
+    if (!extended) {
+      setSayAnimEpoch((e) => e + 1);
+    }
+    prevSayForAnimRef.current = s;
+  }, [agentSay]);
 
   const clearReconnect = () => {
     if (reconnectTimerRef.current) {
@@ -594,6 +699,8 @@ export default function CameraOverlay() {
       ttsPendingTimerRef.current = null;
     }
     setAgentNote("");
+    setSessionTaskLog([]);
+    lastTaskLogSigRef.current = "";
     setInferReady(false);
     resetAgentTts();
     setTtsQueueLen(0);
@@ -737,7 +844,7 @@ export default function CameraOverlay() {
   }, [streaming, tick]);
 
   useEffect(() => {
-    if (!streaming || !sessionId || !inferReady) return;
+    if (!streaming || !sessionId || !inferReady || !agentEnabled) return;
     const base = (
       process.env.NEXT_PUBLIC_AGENT_HTTP_URL ?? inferHttpBaseFromWs(wsUrl)
     ).replace(/\/$/, "");
@@ -799,7 +906,21 @@ export default function CameraOverlay() {
                 ? ok.instruction
                 : ""
           );
-          setAgentActions(Array.isArray(ok.actions) ? ok.actions : []);
+          const rawActions = Array.isArray(ok.actions) ? ok.actions : [];
+          setAgentActions(rawActions);
+          if (rawActions.length > 0) {
+            const sig = rawActions
+              .map((a) => `${a.name}:${JSON.stringify(a.args)}`)
+              .join("|");
+            if (sig !== lastTaskLogSigRef.current) {
+              lastTaskLogSigRef.current = sig;
+              const summary = rawActions.map((a) => a.name).join(" · ");
+              const id = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+              setSessionTaskLog((prev) =>
+                [{ id, summary }, ...prev].slice(0, 15)
+              );
+            }
+          }
           setAgentTaskAnchor(
             typeof ok.task_anchor === "string" ? ok.task_anchor : ""
           );
@@ -866,7 +987,7 @@ export default function CameraOverlay() {
         ttsPendingTimerRef.current = null;
       }
     };
-  }, [streaming, sessionId, wsUrl, inferReady]);
+  }, [streaming, sessionId, wsUrl, inferReady, agentEnabled]);
 
   useEffect(() => {
     const onVis = () => {
@@ -894,12 +1015,31 @@ export default function CameraOverlay() {
 
   useEffect(() => () => stopCamera(), [stopCamera]);
 
+  useEffect(() => {
+    return () => {
+      if (agentBoxGlowTimerRef.current) {
+        clearTimeout(agentBoxGlowTimerRef.current);
+        agentBoxGlowTimerRef.current = null;
+      }
+    };
+  }, []);
+
   const detections = hudFrame?.detections ?? [];
+  const taskAnchorMatch = useMemo(
+    () =>
+      agentTaskAnchor.trim()
+        ? matchTaskAnchorToDetection(detections, agentTaskAnchor)
+        : null,
+    [agentTaskAnchor, detections]
+  );
   const sortedByDepth = [...detections].sort((a, b) => a.rel_depth - b.rel_depth);
-  const topByConf = [...detections]
-    .sort((a, b) => b.conf - a.conf)
-    .slice(0, 8);
   const closest = sortedByDepth[0];
+  const focusPerceptionTrack = useMemo(() => {
+    if (taskAnchorMatch) return detectionToPerceptionTrack(taskAnchorMatch);
+    if (closest) return detectionToPerceptionTrack(closest);
+    return null;
+  }, [taskAnchorMatch, closest]);
+  const focusFromAnchor = Boolean(taskAnchorMatch);
   const meanConf =
     detections.length > 0
       ? detections.reduce((s, d) => s + d.conf, 0) / detections.length
@@ -931,6 +1071,25 @@ export default function CameraOverlay() {
             ref={overlayRef}
             className="pointer-events-none absolute inset-0 z-[1] h-full w-full min-h-0"
           />
+          {streaming && agentEnabled && taskAnchorMatch ? (
+            <AppleIntelligenceGlow
+              isActive
+              state="focus"
+              radius="1rem"
+              className="pointer-events-none absolute z-[3] box-border min-h-[2.5rem] min-w-[2.5rem] overflow-hidden rounded-2xl"
+              style={{
+                left: `${taskAnchorMatch.x1 * 100}%`,
+                top: `${taskAnchorMatch.y1 * 100}%`,
+                width: `${(taskAnchorMatch.x2 - taskAnchorMatch.x1) * 100}%`,
+                height: `${(taskAnchorMatch.y2 - taskAnchorMatch.y1) * 100}%`,
+              }}
+            >
+              <div
+                className="h-full w-full min-h-[inherit] min-w-[inherit] rounded-2xl"
+                aria-hidden
+              />
+            </AppleIntelligenceGlow>
+          ) : null}
           <div className="pointer-events-none absolute inset-0 z-[1] bg-gradient-to-t from-black/45 via-transparent to-black/15" />
 
           <TwinBrandHud
@@ -941,7 +1100,7 @@ export default function CameraOverlay() {
           />
 
           <div className="relative z-20 flex min-h-0 min-w-0 flex-1 flex-col pointer-events-none">
-            <div className="pointer-events-none flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-x-clip px-3 pb-[calc(1.35rem+env(safe-area-inset-bottom))] pt-2 sm:px-4 sm:pb-[calc(1.5rem+env(safe-area-inset-bottom))] sm:pt-3 lg:flex-row lg:items-stretch lg:justify-end lg:gap-4 lg:px-5 lg:pt-4">
+            <div className="pointer-events-none flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-x-clip px-4 pb-[calc(1.35rem+env(safe-area-inset-bottom))] pt-3 sm:px-5 sm:pb-[calc(1.5rem+env(safe-area-inset-bottom))] sm:pt-4 lg:flex-row lg:items-stretch lg:justify-end lg:gap-5 lg:px-6 lg:pt-5">
               <div className="relative flex min-h-0 min-w-0 flex-1 flex-col lg:block">
                 <div
                   className="pointer-events-none absolute left-2 top-2 hidden h-8 w-8 rounded-tl border-l-2 border-t-2 border-[rgba(59,158,255,0.35)] shadow-[0_0_24px_rgba(59,158,255,0.07)] lg:block"
@@ -966,8 +1125,9 @@ export default function CameraOverlay() {
                   className="pointer-events-auto flex max-h-[min(40vh,300px)] min-h-0 w-[min(300px,92vw)] flex-col sm:max-h-[min(46vh,380px)] lg:max-h-full lg:w-[min(300px,32vw)]"
                 >
                   <PerceptionPanel
-                    closest={closest ?? null}
-                    tracks={topByConf}
+                    focusTarget={focusPerceptionTrack}
+                    focusFromAnchor={focusFromAnchor}
+                    sessionTaskLog={sessionTaskLog}
                     depthToAccent={depthToAccent}
                     depthHttpSrc={depthHttpSrc}
                     depthPreviewUrl={depthPreviewUrl}
@@ -979,69 +1139,209 @@ export default function CameraOverlay() {
             </div>
           </div>
 
-          {streaming ? (
-            <div
-              className="pointer-events-none absolute inset-x-0 bottom-0 z-[35] flex justify-center px-3 sm:px-4"
-              style={{
-                paddingBottom:
-                  "max(3.25rem, calc(env(safe-area-inset-bottom, 0px) + 2.75rem))",
-              }}
-            >
-              <div className="glass-panel pointer-events-auto max-h-[min(34vh,280px)] w-full min-w-0 max-w-lg overflow-y-auto overscroll-contain px-4 py-3 sm:px-5 sm:py-3.5">
-                <h2 className="mono-caps text-white/70">Agent</h2>
-                {agentNote ? (
-                  <p className="mt-2 font-mono text-xs leading-relaxed text-[var(--tw-warn)]/85">
-                    {agentNote}
-                  </p>
-                ) : null}
-                <p className="mt-2 text-base font-semibold leading-snug tracking-tight text-white sm:text-lg">
-                  {agentSay || "—"}
-                </p>
-                <div className="mt-3 border-t border-white/8 pt-3">
-                  <p className="font-mono text-[10px] leading-relaxed text-white/58 sm:text-[11px]">
-                    <span className="text-white/65">Anchor</span>{" "}
-                    {agentTaskAnchor ? `"${agentTaskAnchor}"` : "—"}
-                    <span className="text-white/42"> · </span>
-                    <span className="text-white/65">Held</span>{" "}
-                    {agentInferredHeld ? `"${agentInferredHeld}"` : "—"}
-                  </p>
-                  {agentVoice ? (
-                    <ul className="mt-2 space-y-1 font-mono text-[10px] text-white/58 sm:text-[11px]">
-                      <li>
-                        <span className="text-white/52">Phase</span>{" "}
-                        <span className="text-[var(--tw-accent)]/80">{agentVoice.phase}</span>
-                      </li>
-                      <li>
-                        <span className="text-white/52">TTS</span>{" "}
-                        {agentInstruction.trim() || "—"}
-                      </li>
-                      <li>
-                        <span className="text-white/52">Speak</span>{" "}
-                        {agentVoice.speak || "—"}
-                        <span className="text-white/42"> · </span>
-                        <span className="text-[var(--tw-teal)]/70">queue ~{ttsQueueLen}</span>
-                      </li>
-                    </ul>
-                  ) : null}
-                </div>
-                {agentActions.length > 0 ? (
-                  <ul className="mt-3 space-y-1.5 border-t border-white/8 pt-3 font-mono text-[11px] text-white/72 sm:text-[12px]">
-                    {agentActions.map((a, i) => (
-                      <li
-                        key={`${a.name}-${i}`}
-                        className="rounded-lg border border-white/[0.08] bg-black/38 px-2.5 py-1.5"
+          <AnimatePresence mode="wait">
+            {streaming ? (
+              agentEnabled ? (
+                <motion.div
+                  key="agent-dock"
+                  initial={{ opacity: 0, y: 36, scale: 0.94 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{
+                    opacity: 0,
+                    y: 22,
+                    scale: 0.97,
+                    transition: { duration: 0.36, ease: [0.22, 1, 0.36, 1] },
+                  }}
+                  transition={{
+                    type: "spring",
+                    stiffness: 260,
+                    damping: 28,
+                    mass: 0.92,
+                  }}
+                  className="pointer-events-none absolute inset-x-0 bottom-0 z-[35] flex justify-center px-3 sm:px-4"
+                  style={{
+                    paddingBottom:
+                      "max(3.25rem, calc(env(safe-area-inset-bottom, 0px) + 2.75rem))",
+                  }}
+                >
+                  <AppleIntelligenceGlow
+                    isActive
+                    state={agentBoxGlowPulse ? "thinking" : "focus"}
+                    radius="1.35rem"
+                    className="pointer-events-auto !block w-full min-w-0 max-w-xl overflow-hidden sm:max-w-2xl"
+                    style={AGENT_DOCK_GLOW_STYLE}
+                  >
+                    <motion.div
+                      layout
+                      transition={{
+                        type: "spring",
+                        stiffness: 320,
+                        damping: 30,
+                        mass: 0.85,
+                      }}
+                      className="glass-panel max-h-[min(38vh,320px)] w-full overflow-y-auto overscroll-contain px-4 py-3.5 sm:px-5 sm:py-4"
+                      style={{ willChange: "transform" }}
+                    >
+                      <motion.h2
+                        className="mono-caps text-white/75"
+                        initial={{ opacity: 0, y: -6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{
+                          delay: 0.06,
+                          type: "spring",
+                          stiffness: 380,
+                          damping: 32,
+                        }}
                       >
-                        <span className="font-semibold text-[var(--tw-teal)]/85">{a.name}</span>
-                        {a.args && Object.keys(a.args).length > 0
-                          ? ` ${JSON.stringify(a.args)}`
-                          : ""}
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-              </div>
-            </div>
-          ) : null}
+                        Agent
+                      </motion.h2>
+                      {agentNote ? (
+                        <motion.p
+                          initial={{ opacity: 0, y: -4 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{
+                            type: "spring",
+                            stiffness: 380,
+                            damping: 34,
+                          }}
+                          className="mt-2 font-mono text-xs leading-relaxed text-[var(--tw-warn)]/85"
+                        >
+                          {agentNote}
+                        </motion.p>
+                      ) : null}
+                      <div className="relative mt-2.5 min-h-[2.5rem] overflow-hidden">
+                        <AnimatePresence initial={false} mode="popLayout">
+                          <motion.div
+                            key={sayAnimEpoch}
+                            initial={{ opacity: 0, y: 18 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -36 }}
+                            transition={{
+                              type: "spring",
+                              stiffness: 340,
+                              damping: 32,
+                              mass: 0.8,
+                              opacity: { duration: 0.24 },
+                            }}
+                            className="text-base font-semibold leading-snug tracking-tight text-white sm:text-lg"
+                            style={{ willChange: "transform" }}
+                          >
+                            <AgentRevealText text={agentSay} charPerSec={112} />
+                          </motion.div>
+                        </AnimatePresence>
+                      </div>
+                      <motion.div
+                        layout
+                        className="mt-3 border-t border-white/8 pt-3"
+                        transition={{
+                          type: "spring",
+                          stiffness: 340,
+                          damping: 32,
+                        }}
+                      >
+                        <p className="font-mono text-[10px] leading-relaxed text-white/58 sm:text-[11px]">
+                          <span className="text-white/65">Anchor</span>{" "}
+                          {agentTaskAnchor ? `"${agentTaskAnchor}"` : "—"}
+                          <span className="text-white/42"> · </span>
+                          <span className="text-white/65">Held</span>{" "}
+                          {agentInferredHeld ? `"${agentInferredHeld}"` : "—"}
+                        </p>
+                        {agentVoice ? (
+                          <ul className="mt-2 space-y-1 font-mono text-[10px] text-white/58 sm:text-[11px]">
+                            <li>
+                              <span className="text-white/52">Phase</span>{" "}
+                              <span className="text-[var(--tw-accent)]/80">{agentVoice.phase}</span>
+                            </li>
+                            <li>
+                              <span className="text-white/52">TTS</span>{" "}
+                              {agentInstruction.trim() || "—"}
+                            </li>
+                            <li>
+                              <span className="text-white/52">Speak</span>{" "}
+                              {agentVoice.speak || "—"}
+                              <span className="text-white/42"> · </span>
+                              <span className="text-[var(--tw-teal)]/70">queue ~{ttsQueueLen}</span>
+                            </li>
+                          </ul>
+                        ) : null}
+                      </motion.div>
+                      <AnimatePresence initial={false}>
+                        {agentActions.length > 0 ? (
+                          <motion.ul
+                            key="actions"
+                            initial={{ opacity: 0, y: 8 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 4 }}
+                            transition={{
+                              type: "spring",
+                              stiffness: 360,
+                              damping: 34,
+                            }}
+                            className="mt-3 space-y-1.5 border-t border-white/8 pt-3 font-mono text-[11px] text-white/72 sm:text-[12px]"
+                          >
+                            {agentActions.map((a, i) => (
+                              <motion.li
+                                key={`${a.name}-${i}`}
+                                layout
+                                initial={{ opacity: 0, x: -14 }}
+                                animate={{ opacity: 1, x: 0 }}
+                                exit={{ opacity: 0, x: -8 }}
+                                transition={{
+                                  type: "spring",
+                                  stiffness: 400,
+                                  damping: 30,
+                                  delay: i * 0.045,
+                                }}
+                                className="rounded-lg border border-white/[0.08] bg-black/38 px-2.5 py-1.5"
+                              >
+                                <span className="font-semibold text-[var(--tw-teal)]/85">{a.name}</span>
+                                {a.args && Object.keys(a.args).length > 0
+                                  ? ` ${JSON.stringify(a.args)}`
+                                  : ""}
+                              </motion.li>
+                            ))}
+                          </motion.ul>
+                        ) : null}
+                      </AnimatePresence>
+                    </motion.div>
+                  </AppleIntelligenceGlow>
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="agent-paused-hint"
+                  role="status"
+                  initial={{ opacity: 0, y: 16, scale: 0.97 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{
+                    opacity: 0,
+                    y: 12,
+                    scale: 0.98,
+                    transition: { duration: 0.32, ease: [0.22, 1, 0.36, 1] },
+                  }}
+                  transition={{
+                    type: "spring",
+                    stiffness: 300,
+                    damping: 30,
+                    mass: 0.88,
+                  }}
+                  className="pointer-events-none absolute inset-x-0 bottom-0 z-[35] flex justify-center px-3 sm:px-4"
+                  style={{
+                    paddingBottom:
+                      "max(3.25rem, calc(env(safe-area-inset-bottom, 0px) + 2.75rem))",
+                  }}
+                >
+                  <motion.p
+                    className="mono-caps rounded-full border border-white/[0.12] bg-black/50 px-5 py-2.5 text-center text-[10px] text-white/58 backdrop-blur-md sm:text-[11px]"
+                    style={{
+                      boxShadow: "0 8px 32px -8px rgba(0,0,0,0.4)",
+                    }}
+                  >
+                    Agent off · press A to enable
+                  </motion.p>
+                </motion.div>
+              )
+            ) : null}
+          </AnimatePresence>
 
           <TwinStatusBar
             objects={detections.length}
@@ -1050,6 +1350,7 @@ export default function CameraOverlay() {
             frameH={hudFrame?.h ?? 0}
             inferHz={inferHz}
             streaming={streaming}
+            agentLive={streaming && agentEnabled}
             meanConfPct={
               detections.length > 0 ? `${(meanConf * 100).toFixed(0)}%` : null
             }
@@ -1090,6 +1391,9 @@ export default function CameraOverlay() {
           setOpenaiRotateState(on);
         }}
         openaiTtsLabel={openaiTtsLabel}
+        agentEnabled={agentEnabled}
+        agentToggleDisabled={!streaming}
+        onAgentEnabledChange={setAgentEnabled}
       />
     </div>
   );

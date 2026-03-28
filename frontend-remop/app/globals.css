@@ -203,6 +203,97 @@ body {
   opacity: 0.35;
 }
 
+/**
+ * Settings / HUD fields — flat surface (no OS glossy `<select>` chrome).
+ * Matches `--tw-panel` so controls align with glass-panel cards.
+ */
+.settings-field {
+  display: block;
+  width: 100%;
+  background: color-mix(in srgb, var(--tw-panel) 92%, transparent);
+  border: 1px solid var(--tw-glass-border);
+  border-radius: 0.875rem;
+  color: var(--foreground);
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+.settings-field::placeholder {
+  color: rgba(232, 234, 239, 0.38);
+}
+.settings-field:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.settings-field:focus {
+  outline: none;
+  border-color: rgba(59, 158, 255, 0.42);
+  box-shadow: 0 0 0 2px rgba(59, 158, 255, 0.1);
+}
+.settings-field:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+select.settings-field {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  padding: 0.625rem 2.35rem 0.625rem 0.875rem;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20' fill='none'%3E%3Cpath d='M5.5 7.5L10 12l4.5-4.5' stroke='%2399a3b8' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.55rem center;
+  background-size: 1.15rem;
+}
+
+button.settings-field {
+  cursor: pointer;
+  padding: 0.625rem 0.75rem 0.625rem 0.875rem;
+}
+button.settings-field:disabled {
+  cursor: not-allowed;
+}
+
+input.settings-field {
+  padding: 0.625rem 0.875rem;
+}
+
+/* Flat primary CTA (no vertical gradient) — use in settings sheet */
+.settings-btn-primary {
+  background: rgba(59, 158, 255, 0.22);
+  border: 1px solid rgba(59, 158, 255, 0.42);
+  color: #fff;
+  border-radius: 0.875rem;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+.settings-btn-primary:hover:not(:disabled) {
+  background: rgba(59, 158, 255, 0.3);
+  border-color: rgba(59, 158, 255, 0.55);
+  box-shadow: 0 0 24px rgba(59, 158, 255, 0.12);
+}
+.settings-btn-primary:disabled {
+  opacity: 0.45;
+}
+
+.settings-btn-quiet {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--tw-glass-border);
+  color: rgba(255, 255, 255, 0.9);
+  border-radius: 0.875rem;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+.settings-btn-quiet:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+.settings-btn-quiet:disabled {
+  opacity: 0.35;
+}
+
 .mono-caps {
   font-family: var(--font-geist-mono), ui-monospace, monospace;
   font-size: 0.65rem;

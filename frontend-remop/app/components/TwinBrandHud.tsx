@@ -28,10 +28,10 @@ export function TwinBrandHud({
   return (
     <nav
       aria-label="Brand and local context"
-      className={`pointer-events-none absolute left-0 top-0 z-[25] max-w-[min(calc(100vw-1.5rem),28rem)] pl-[max(0.65rem,env(safe-area-inset-left))] pt-[max(0.45rem,env(safe-area-inset-top))] ${className}`}
+      className={`pointer-events-none absolute left-0 top-0 z-[25] max-w-[min(calc(100vw-2rem),30rem)] pl-[max(1rem,env(safe-area-inset-left))] pt-[max(0.85rem,env(safe-area-inset-top))] ${className}`}
     >
       <div
-        className="inline-flex max-w-full items-center gap-2.5 rounded-full border border-[var(--tw-glass-border)] bg-[var(--tw-panel)] px-3.5 py-2 sm:gap-3 sm:px-4 sm:py-2.5"
+        className="inline-flex max-w-full items-center gap-3 rounded-2xl border border-[var(--tw-glass-border)] bg-[var(--tw-panel)] px-4 py-2.5 sm:gap-3.5 sm:px-5 sm:py-3"
         style={{
           backdropFilter: "blur(var(--tw-glass-blur)) saturate(1.2)",
           WebkitBackdropFilter: "blur(var(--tw-glass-blur)) saturate(1.2)",
@@ -42,14 +42,14 @@ export function TwinBrandHud({
           {brand}
         </span>
         <span
-          className="hidden h-3.5 w-px shrink-0 bg-white/[0.14] sm:block"
+          className="hidden h-4 w-px shrink-0 bg-white/[0.14] sm:block"
           aria-hidden
         />
         <p
           className="min-w-0 truncate font-mono text-[9px] leading-snug sm:text-[10px]"
           title={fullTitle}
         >
-          <span className="max-w-[9rem] truncate text-white/72 sm:max-w-[12rem] sm:text-white/75">
+          <span className="max-w-[9.5rem] truncate text-white/72 sm:max-w-[13rem] sm:text-white/75">
             {location}
           </span>
           <span className="text-white/40"> · </span>

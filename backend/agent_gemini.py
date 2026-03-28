@@ -6,6 +6,7 @@ import asyncio
 import functools
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -22,6 +23,19 @@ from executors import AGENT
 from gemini_session_log import append_gemini_log
 
 _client: genai.Client | None = None
+
+_THOUGHT_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def _clamp_operator_thought(text: str, *, max_sentences: int = 2) -> str:
+    """Keep operator/log thought short: at most max_sentences (default 2)."""
+    t = (text or "").strip()
+    if not t or max_sentences < 1:
+        return t
+    parts = [p.strip() for p in _THOUGHT_SENTENCE_SPLIT.split(t) if p.strip()]
+    if len(parts) <= max_sentences:
+        return t
+    return " ".join(parts[:max_sentences]).strip()
 
 
 def _serialize_gemini_response(resp: Any) -> dict[str, Any]:
@@ -63,21 +77,22 @@ CONTINUITY_AND_ANCHOR_RULES = """
 
 PHYSICAL_EVIDENCE_AND_HOLDING = """
 ## Physical evidence, thought, instruction, and tools
-- Tools are requests, not facts. Use past tense in thought for pick/place/drop/motion only when the frame supports it: visible hand–object contact, last_outcome, or human feedback—not because a class disappeared from the JSON list (it often does not).
-- Pick_up progress (first-person): grounding may still list the object after a successful grasp. Treat a **visible hand** grasping or clearly contacting the intended object as evidence the human is picking it up; then stop repeating pick_up and move toward place (with a grounded "near"). If there is no hand contact and no progress, keep pick_up in actions per intent persistence; leave instruction "" when repeating (Silence is Golden).
-- Holding: combine the session inferred-held line with the image. If inferred held matches a class still in detections, assume that detection can be the item in hand—do not pick_up that class again until place or drop. Same-class objects sitting on surfaces **without** a grasp/hand cue are not proof of holding; task_anchor alone is not proof.
+- Tools are requests, not facts. Use past tense in thought for pick/place/drop/motion only when the frame supports it: hand–object contact **seen in the WebP**, last_outcome, or human feedback—not because a class disappeared from the JSON list (it often does not). The detector JSON never includes hands or grasp; do not expect a "hand" label there. An empty grounded list is not proof the anchor object is gone; never claim a class is "still detected" if it is not in the JSON—use the image, vision-inferred contact, and last_outcome instead.
+- Pick_up (first-person): after you requested pick_up, **inspect the WebP with your vision** (multimodal)—not the JSON—for a hand grasping or clearly touching the intended object; that is pick-up progress. Grounding may still list that class while it is in hand; do not treat "still in JSON" as failure. With contact visible in the image, stop repeating pick_up (instruction "" when continuing) and move toward place with a grounded "near". With no visible contact and no other progress, keep pick_up in actions per intent persistence; leave instruction "" when repeating (Silence is Golden).
+- Holding: combine the session inferred-held line with **vision on the WebP**. If inferred held matches a class still in detections, that row may be the item in hand—do not pick_up that class again until place or drop. Same-class objects on a surface **without** contact/grasp visible in the image are not proof of holding; task_anchor alone is not proof.
 - Place only when a valid "near" class is in the current grounded list; if not, look_around or move_forward (cz) first—do not spam the same invalid place.
 - If last_outcome contradicts the scene, realign; use CLEAR or a new anchor if needed.
-- Intent persistence: keep the same primary motor action across ticks until completion, clear failure, or the hand/grasp cue above for pick_up. Do not swap to wait or look_around alone on the very next tick while the human may still be executing the prior step; use wait when motion is settling per cooldown hints.
+- Intent persistence: keep the same primary motor action across ticks until completion, clear failure, or hand/grasp **visible in the WebP** for pick_up—not merely "object vanished from grounding." Do not swap to wait or look_around alone on the very next tick while the human may still be executing the prior step; use wait when motion is settling per cooldown hints.
 """
 
-PERCEPTION_AND_SCHEMA_BLOCK = f"""You see one still frame (WebP) plus a JSON list of grounded objects. Fields use normalized image coordinates cx, cy in [0,1].
+PERCEPTION_AND_SCHEMA_BLOCK = f"""You see one still frame (WebP) plus a JSON list of grounded objects. The list is from object detection only: it does **not** label hands, grasps, or picked-up state. Infer hand touching or holding the target **only by examining the WebP** with your multimodal vision.
+Fields use normalized image coordinates cx, cy in [0,1].
 cz is a rough step-equivalent forward distance from monocular depth (calibrated constant K), NOT metric LIDAR—use only for ordering near vs far and coarse approach.
 
 {ACTION_REGISTRY_PROMPT}
 
 Output valid JSON only matching the schema: thought, instruction, actions, and task_anchor.
-- thought: operator dashboard only (status, reasoning, conversational allowed). Not read aloud.
+- thought: operator / log only (not TTS). One short sentence ideal; two sentences maximum. No paragraph-style narration.
 - instruction: the ONLY spoken line for this tick; second-person imperatives; follow schema (banned words, no questions). Empty "" means complete silence—use that during wait or when repeating the same ongoing motion.
 - task_anchor: do not output punctuation-only or whitespace-only anchors; use "" to keep, CLEAR to clear, or a short object class name.
 Be concise. Prefer one clear next step. Safety first."""
@@ -158,7 +173,8 @@ def _user_text(
     if ih:
         parts.append(
             f'Session tool-inference: last requested holding target: "{ih}". '
-            "Verify in the image before claiming the human is holding it; infer cleared after place or drop."
+            "Detection JSON does not include hands—judge grasp or contact only from the WebP frame. "
+            "Infer cleared after place or drop."
         )
     else:
         parts.append(
@@ -170,7 +186,8 @@ def _user_text(
         parts.append(
             "Recent action labels (rolling): "
             + json.dumps(recent_actions)
-            + " Re-issuing the SAME physical tool across ticks until the image or last_outcome shows progress is allowed and encouraged (intent persistence). "
+            + " Re-issuing the SAME physical tool across ticks until completion, clear failure, last_outcome, or "
+            "(for pick_up) hand–object grasp/contact **visible in the WebP** (vision, not detection JSON) is allowed and encouraged (intent persistence). "
             "Avoid spamming different conflicting motions (e.g. rapid place vs pick_up flip-flop). If stuck, use look_around, reorient, wait, or CLEAR the anchor per rules."
         )
     if last_issued_action_labels:
@@ -186,7 +203,7 @@ def _user_text(
         if any(b in MOTION_ACTION_NAMES for b in bases):
             parts.append(
                 f"Only {seconds_since_last_step:.2f}s since last agent step; last step used motion. "
-                "If execution is likely still in progress, use wait with args_json \"{}\" or a brief thought line; "
+                "If execution is likely still in progress, use wait with args_json \"{}\" or one short thought sentence; "
                 "do not repeat the same motion tool unless the view clearly shows it failed."
             )
     if goal:
@@ -198,7 +215,8 @@ def _user_text(
         )
     parts.append(
         "Respond with JSON: one physical next step for the human and the matching actions. "
-        "Use thought for operator-facing status; use instruction only when the human should hear speech this tick—"
+        "thought: one sentence for the operator log if possible, two at most (not spoken). "
+        "instruction: only when the human should hear speech this tick—"
         "otherwise leave instruction empty \"\" for silence (no server-derived speech from actions)."
     )
     return "\n".join(parts)
@@ -269,11 +287,14 @@ def run_agent_sync(
         )
         base_entry["gemini_response"] = _serialize_gemini_response(resp)
         if resp.parsed is not None and isinstance(resp.parsed, AgentResponse):
-            base_entry["agent_response"] = resp.parsed.model_dump()
+            out = resp.parsed.model_copy(
+                update={"thought": _clamp_operator_thought(resp.parsed.thought)}
+            )
+            base_entry["agent_response"] = out.model_dump()
             if log_sid:
                 append_gemini_log(log_sid, base_entry)
                 logged = True
-            return resp.parsed
+            return out
         raw = (resp.text or "").strip()
         if not raw:
             base_entry["error"] = "empty Gemini response"
@@ -283,11 +304,12 @@ def run_agent_sync(
             raise RuntimeError("empty Gemini response")
         data = json.loads(raw)
         parsed = AgentResponse.model_validate(data)
-        base_entry["agent_response"] = parsed.model_dump()
+        out = parsed.model_copy(update={"thought": _clamp_operator_thought(parsed.thought)})
+        base_entry["agent_response"] = out.model_dump()
         if log_sid:
             append_gemini_log(log_sid, base_entry)
             logged = True
-        return parsed
+        return out
     except Exception as e:
         if not logged:
             base_entry["error"] = repr(e)
