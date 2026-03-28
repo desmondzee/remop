@@ -7,6 +7,7 @@ Run: uvicorn inference_server:app --host 0.0.0.0 --port 8000
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 from io import BytesIO
 from pathlib import Path
@@ -21,6 +22,7 @@ import cv2
 import numpy as np
 from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from PIL import Image
 
 from agent_attention import prioritize_grounded_for_model
@@ -149,6 +151,48 @@ async def _send_json_safe(ws: WebSocket, payload: dict) -> bool:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/v1/depth_preview")
+async def depth_preview(
+    session_id: str | None = Query(
+        None,
+        description="Same id as WebSocket ?session_id= (default: default)",
+    ),
+    v: int | None = Query(
+        None,
+        description="Cache-bust version from client (e.g. infer frame counter).",
+    ),
+) -> Response:
+    """
+    Latest MiDaS depth as JPEG bytes from session state (same source as WebSocket depth_jpeg_b64).
+    Use for direct <img src> when JSON-in-WebSocket is undesirable.
+    """
+    del v  # cache-bust only; no server-side use
+    sid = _session_id(session_id)
+    snap = await copy_snapshot(sid)
+    if snap is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No perception state for this session yet; stream frames on /ws/infer first.",
+        )
+    raw_b64 = snap.detections.get("depth_jpeg_b64")
+    if not isinstance(raw_b64, str) or not raw_b64.strip():
+        raise HTTPException(
+            status_code=404,
+            detail="Depth preview not available (set INCLUDE_DEPTH_PREVIEW=1 on the inference server).",
+        )
+    try:
+        raw = base64.b64decode(raw_b64)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Invalid depth preview data: {e}") from e
+    if not raw:
+        raise HTTPException(status_code=404, detail="Empty depth preview.")
+    return Response(
+        content=raw,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
 
 
 @app.post("/v1/agent/step")

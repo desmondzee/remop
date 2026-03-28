@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "remop",
-  description: "YOLO + MiDaS live camera overlay",
+  title: "remop — perception twin",
+  description: "YOLO + MiDaS digital twin with live vision overlay",
 };
 
 export default function RootLayout({
@@ -25,9 +25,9 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${geistSans.variable} ${geistMono.variable} h-[100dvh] antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="flex h-[100dvh] flex-col overflow-hidden">{children}</body>
     </html>
   );
 }

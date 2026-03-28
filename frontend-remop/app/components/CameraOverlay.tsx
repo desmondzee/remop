@@ -1,17 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getIsTtsPlaying,
   getOpenaiTtsRotateVoices,
   getOpenaiTtsVoice,
   getTtsEngine,
   getTtsQueueDepth,
-  OPENAI_TTS_VOICE_IDS,
   resetAgentTts,
   resumeAudioContextAfterUserGesture,
-  setOpenaiTtsRotateVoices,
-  setOpenaiTtsVoice,
   setTtsEngine,
   speakInstruction,
   subscribeOpenaiTtsStatus,
@@ -21,10 +18,17 @@ import {
   type TtsEngine,
 } from "../lib/agentTts";
 
+import { PerceptionPanel, type DetectorPresetId } from "./PerceptionPanel";
+import { SettingsModal } from "./SettingsModal";
+import { TwinBrandHud } from "./TwinBrandHud";
+import { TwinStatusBar } from "./TwinStatusBar";
+
 const DEFAULT_WS =
   process.env.NEXT_PUBLIC_INFERENCE_WS_URL ?? "ws://127.0.0.1:8000/ws/infer";
 
 function inferHttpBaseFromWs(wsUrl: string): string {
+  const override = process.env.NEXT_PUBLIC_INFERENCE_HTTP_URL?.trim();
+  if (override) return override.replace(/\/$/, "");
   try {
     const u = new URL(wsUrl);
     u.protocol = u.protocol === "wss:" ? "https:" : "http:";
@@ -80,9 +84,6 @@ const FMT_WEBP = 2;
 const WEBP_QUALITY = 0.5;
 const JPEG_QUALITY = 0.72;
 
-/** Backend /ws/infer?model=… presets (see inference_server.MODEL_PRESETS). */
-type DetectorPreset = "oiv7" | "coco";
-
 type Detection = {
   label: string;
   conf: number;
@@ -100,7 +101,79 @@ type InferResponse = {
   h: number;
   detections: Detection[];
   error?: string;
+  depth_jpeg_b64?: string;
+  depth_preview_error?: string;
 };
+
+const HUD_THROTTLE_MS = 100;
+
+/**
+ * Human-readable zone name (e.g. "Pacific Time"), not the raw IANA id.
+ */
+function friendlyTimeZoneLabel(): string {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const parts = new Intl.DateTimeFormat(undefined, {
+      timeZone: tz,
+      timeZoneName: "longGeneric",
+    }).formatToParts(new Date());
+    const name = parts.find((p) => p.type === "timeZoneName")?.value?.trim();
+    if (name) return name;
+    return tz.replaceAll("_", " ");
+  } catch {
+    return "—";
+  }
+}
+
+function depthToAccent(relDepth: number): string {
+  const t = Math.min(1, Math.max(0, relDepth / 85));
+  const hue = 168 - t * 100;
+  return `hsl(${hue} 82% 58%)`;
+}
+
+function drawTeslaCorners(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  color: string,
+  arm: number
+): void {
+  const L = Math.max(10, Math.min(arm, w * 0.12, h * 0.12));
+  ctx.strokeStyle = color;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 7;
+  ctx.lineWidth = 2;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  ctx.beginPath();
+  ctx.moveTo(x, y + L);
+  ctx.lineTo(x, y);
+  ctx.lineTo(x + L, y);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(x + w - L, y);
+  ctx.lineTo(x + w, y);
+  ctx.lineTo(x + w, y + L);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(x, y + h - L);
+  ctx.lineTo(x, y + h);
+  ctx.lineTo(x + L, y + h);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(x + w - L, y + h);
+  ctx.lineTo(x + w, y + h);
+  ctx.lineTo(x + w, y + h - L);
+  ctx.stroke();
+
+  ctx.shadowBlur = 0;
+}
 
 function supportsWebpEncode(): Promise<boolean> {
   return new Promise((resolve) => {
@@ -146,7 +219,7 @@ export default function CameraOverlay() {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectWsRef = useRef<() => void>(() => {});
   const switchingPresetRef = useRef(false);
-  const prevDetectorPresetRef = useRef<DetectorPreset>("oiv7");
+  const prevDetectorPresetRef = useRef<DetectorPresetId>("oiv7");
   const agentStepInFlightRef = useRef(false);
   const inferReadyRef = useRef(false);
   const sessionIdRef = useRef<string | null>(null);
@@ -154,14 +227,16 @@ export default function CameraOverlay() {
   const isTtsPlayingRef = useRef(false);
   const ttsPendingTimerRef = useRef<number | null>(null);
   const lastNonSupersedeTtsAtRef = useRef(0);
+  const lastHudPushRef = useRef(0);
+  const inferMsgCountRef = useRef(0);
 
   const [streaming, setStreaming] = useState(false);
-  const [status, setStatus] = useState("Idle — click Start camera");
+  const [status, setStatus] = useState("Standby");
   const [wsUrl, setWsUrl] = useState(DEFAULT_WS);
   const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [devicesLoaded, setDevicesLoaded] = useState(false);
-  const [detectorPreset, setDetectorPreset] = useState<DetectorPreset>("oiv7");
+  const [detectorPreset, setDetectorPreset] = useState<DetectorPresetId>("oiv7");
   /** Client-only (null on SSR/first paint) so hydration matches; set in useEffect. */
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [agentSay, setAgentSay] = useState("");
@@ -182,6 +257,99 @@ export default function CameraOverlay() {
   const [agentNote, setAgentNote] = useState("");
   /** Backend LATEST_STATE exists only after at least one successful infer for this session. */
   const [inferReady, setInferReady] = useState(false);
+  const [hudFrame, setHudFrame] = useState<InferResponse | null>(null);
+  const [inferHz, setInferHz] = useState(0);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [wsConnecting, setWsConnecting] = useState(false);
+  const [rightPanelOpen, setRightPanelOpen] = useState(true);
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [depthPreviewUrl, setDepthPreviewUrl] = useState<string | null>(null);
+  const [depthPreviewError, setDepthPreviewError] = useState<string | null>(null);
+  const [depthFrameSeq, setDepthFrameSeq] = useState(0);
+  const [clockTick, setClockTick] = useState(() => Date.now());
+  const [geoLabel, setGeoLabel] = useState(friendlyTimeZoneLabel);
+
+  const depthHttpSrc = useMemo(() => {
+    if (!streaming || !sessionId || !inferReady) return null;
+    const base = inferHttpBaseFromWs(wsUrl);
+    return `${base}/v1/depth_preview?session_id=${encodeURIComponent(sessionId)}&v=${depthFrameSeq}`;
+  }, [streaming, sessionId, inferReady, wsUrl, depthFrameSeq]);
+
+  const clockParts = useMemo(() => {
+    const d = new Date(clockTick);
+    return {
+      weekday: d.toLocaleDateString(undefined, { weekday: "short" }),
+      dateLine: d.toLocaleDateString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+      }),
+      time: d.toLocaleTimeString(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      }),
+    };
+  }, [clockTick]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => setClockTick(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const { latitude: lat, longitude: lon } = pos.coords;
+        const ns = lat >= 0 ? "N" : "S";
+        const ew = lon >= 0 ? "E" : "W";
+        const coordLabel = `${Math.abs(lat).toFixed(3)}°${ns} · ${Math.abs(lon).toFixed(3)}°${ew}`;
+        setGeoLabel(coordLabel);
+        try {
+          const r = await fetch(
+            `/api/reverse-geocode?lat=${encodeURIComponent(String(lat))}&lon=${encodeURIComponent(String(lon))}`
+          );
+          if (!r.ok) return;
+          const body = (await r.json()) as { label?: string | null };
+          if (body.label?.trim()) setGeoLabel(body.label.trim());
+        } catch {
+          /* keep coordinates */
+        }
+      },
+      () => {},
+      { enableHighAccuracy: false, timeout: 12_000, maximumAge: 120_000 }
+    );
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && settingsModalOpen) {
+        e.preventDefault();
+        setSettingsModalOpen(false);
+        return;
+      }
+      if (e.key === "." && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setSettingsModalOpen((open) => !open);
+        return;
+      }
+      if (e.key !== "/") return;
+      const el = e.target;
+      if (
+        el instanceof HTMLInputElement ||
+        el instanceof HTMLTextAreaElement ||
+        el instanceof HTMLSelectElement
+      ) {
+        return;
+      }
+      if (el instanceof HTMLElement && el.isContentEditable) return;
+      e.preventDefault();
+      setRightPanelOpen((open) => !open);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [settingsModalOpen]);
 
   const clearReconnect = () => {
     if (reconnectTimerRef.current) {
@@ -189,6 +357,15 @@ export default function CameraOverlay() {
       reconnectTimerRef.current = null;
     }
   };
+
+  const pushHudThrottled = useCallback((data: InferResponse) => {
+    inferMsgCountRef.current += 1;
+    const now = performance.now();
+    if (now - lastHudPushRef.current >= HUD_THROTTLE_MS) {
+      lastHudPushRef.current = now;
+      setHudFrame(data);
+    }
+  }, []);
 
   const drawDetections = useCallback((data: InferResponse) => {
     const overlay = overlayRef.current;
@@ -199,23 +376,39 @@ export default function CameraOverlay() {
     const ow = overlay.width;
     const oh = overlay.height;
     ctx.clearRect(0, 0, ow, oh);
-    const dets = data.detections;
-    if (!Array.isArray(dets) || dets.length === 0) return;
-    ctx.lineWidth = 2;
-    ctx.font = "14px system-ui, sans-serif";
-    for (const d of dets) {
+    if (!data.detections?.length) return;
+
+    ctx.font = "600 11px var(--font-geist-mono, ui-monospace), monospace";
+
+    for (const d of data.detections) {
       const x = d.x1 * ow;
       const y = d.y1 * oh;
       const w = (d.x2 - d.x1) * ow;
       const h = (d.y2 - d.y1) * oh;
-      ctx.strokeStyle = "#22c55e";
-      ctx.strokeRect(x, y, w, h);
-      const label = `${d.label} ${(d.conf * 100).toFixed(0)}% d=${d.rel_depth.toFixed(1)}`;
+      const accent = depthToAccent(d.rel_depth);
+      drawTeslaCorners(ctx, x, y, w, h, accent, 26);
+
+      const label = `${d.label}  ${(d.conf * 100).toFixed(0)}%  ·  z ${d.rel_depth.toFixed(1)}`;
+      const padX = 8;
       const tw = ctx.measureText(label).width;
-      ctx.fillStyle = "rgba(0,0,0,0.65)";
-      ctx.fillRect(x, y - 18, tw + 8, 18);
-      ctx.fillStyle = "#fff";
-      ctx.fillText(label, x + 4, y - 5);
+      const pillW = tw + padX * 2;
+      const pillH = 20;
+      const py = Math.max(2, y - pillH - 4);
+
+      ctx.fillStyle = "rgba(8, 10, 14, 0.72)";
+      ctx.strokeStyle = "rgba(255,255,255,0.12)";
+      ctx.lineWidth = 1;
+      const r = 6;
+      ctx.beginPath();
+      ctx.roundRect(x, py, pillW, pillH, r);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = accent;
+      ctx.shadowColor = accent;
+      ctx.shadowBlur = 4;
+      ctx.fillText(label, x + padX, py + 14);
+      ctx.shadowBlur = 0;
     }
   }, []);
 
@@ -255,6 +448,14 @@ export default function CameraOverlay() {
     return () => window.clearInterval(id);
   }, [streaming]);
 
+  useEffect(() => {
+    const tick = window.setInterval(() => {
+      setInferHz(inferMsgCountRef.current);
+      inferMsgCountRef.current = 0;
+    }, 1000);
+    return () => window.clearInterval(tick);
+  }, []);
+
   const connectWs = useCallback(() => {
     clearReconnect();
     if (!streamingRef.current || !sessionId) return;
@@ -271,11 +472,15 @@ export default function CameraOverlay() {
       const ws = new WebSocket(urlToOpen);
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
-      setStatus("Connecting…");
+      setStatus("Linking perception stack…");
+      setWsConnecting(true);
+      setWsConnected(false);
       ws.onopen = () => {
         reconnectDelayRef.current = 1000;
         setInferReady(false);
-        setStatus("Connected — inferring");
+        setWsConnecting(false);
+        setWsConnected(true);
+        setStatus("Perception live");
       };
       ws.onmessage = (ev) => {
         try {
@@ -285,33 +490,45 @@ export default function CameraOverlay() {
             setStatus(`Server: ${data.error}`);
           } else if (data.w > 0) {
             setInferReady(true);
+            setDepthFrameSeq((n) => n + 1);
+          }
+          if (data.depth_jpeg_b64) {
+            setDepthPreviewUrl(`data:image/jpeg;base64,${data.depth_jpeg_b64}`);
+            setDepthPreviewError(null);
+          } else {
+            setDepthPreviewUrl(null);
+            const err = data.depth_preview_error?.trim();
+            setDepthPreviewError(err || null);
           }
           drawDetections(data);
+          pushHudThrottled(data);
         } catch {
           busyRef.current = false;
         }
       };
       ws.onerror = () => {
-        setStatus("WebSocket error");
+        setStatus("Stream fault");
       };
       ws.onclose = () => {
         wsRef.current = null;
         busyRef.current = false;
+        setWsConnecting(false);
+        setWsConnected(false);
         if (!streamingRef.current) return;
         if (switchingPresetRef.current) {
           switchingPresetRef.current = false;
           connectWsRef.current();
           return;
         }
-        setStatus("Disconnected — reconnecting…");
+        setStatus("Reconnecting…");
         const delay = reconnectDelayRef.current;
         reconnectDelayRef.current = Math.min(delay * 2, 10_000);
         reconnectTimerRef.current = setTimeout(() => connectWsRef.current(), delay);
       };
     } catch {
-      setStatus("Invalid WebSocket URL");
+      setStatus("Invalid stream URL");
     }
-  }, [wsUrl, detectorPreset, sessionId, drawDetections]);
+  }, [wsUrl, detectorPreset, sessionId, drawDetections, pushHudThrottled]);
 
   useEffect(() => {
     connectWsRef.current = connectWs;
@@ -380,6 +597,12 @@ export default function CameraOverlay() {
     setInferReady(false);
     resetAgentTts();
     setTtsQueueLen(0);
+    setHudFrame(null);
+    setWsConnected(false);
+    setWsConnecting(false);
+    setDepthPreviewUrl(null);
+    setDepthPreviewError(null);
+    setDepthFrameSeq(0);
     clearReconnect();
     busyRef.current = false;
     cancelAnimationFrame(rafRef.current);
@@ -399,7 +622,7 @@ export default function CameraOverlay() {
       const ctx = o.getContext("2d");
       ctx?.clearRect(0, 0, o.width, o.height);
     }
-    setStatus("Stopped");
+    setStatus("Standby");
     void refreshVideoDevices();
   }, [refreshVideoDevices]);
 
@@ -431,7 +654,8 @@ export default function CameraOverlay() {
       streamingRef.current = true;
       setStreaming(true);
       unlockAudioFromUserGesture();
-      setStatus(webpOk ? "Camera on (WebP)" : "Camera on (JPEG fallback)");
+      void resumeAudioContextAfterUserGesture();
+      setStatus(webpOk ? "Vision · WebP" : "Vision · JPEG");
     } catch (e) {
       setStatus(`Camera failed: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -670,251 +894,189 @@ export default function CameraOverlay() {
 
   useEffect(() => () => stopCamera(), [stopCamera]);
 
+  const detections = hudFrame?.detections ?? [];
+  const sortedByDepth = [...detections].sort((a, b) => a.rel_depth - b.rel_depth);
+  const topByConf = [...detections]
+    .sort((a, b) => b.conf - a.conf)
+    .slice(0, 8);
+  const closest = sortedByDepth[0];
+  const meanConf =
+    detections.length > 0
+      ? detections.reduce((s, d) => s + d.conf, 0) / detections.length
+      : 0;
+
+  const wsState = wsConnected
+    ? "LIVE"
+    : wsConnecting
+      ? "SYNC"
+      : streaming
+        ? "WAIT"
+        : "OFF";
+
   return (
-    <div className="flex w-full max-w-4xl flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <label className="flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400">
-          Voice
-          <select
-            className="rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-            value={ttsEngine}
-            disabled={streaming}
-            onChange={(e) => {
-              const next = e.target.value as TtsEngine;
-              resetAgentTts();
-              setTtsEngineState(next);
-              setTtsQueueLen(0);
-            }}
-          >
-            <option value="browser">Browser (Web Speech)</option>
-            <option value="openai">OpenAI (tts-1, cloud)</option>
-          </select>
-        </label>
-        {ttsEngine === "openai" ? (
-          <>
-            <label className="flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400">
-              OpenAI voice
-              <select
-                className="rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-                value={openaiVoice}
-                disabled={streaming || openaiRotate}
-                title={
-                  openaiRotate
-                    ? "Fixed voice disabled while rotating"
-                    : "OpenAI speech voice"
-                }
-                onChange={(e) => {
-                  const v = e.target.value as OpenaiTtsVoiceId;
-                  setOpenaiTtsVoice(v);
-                  setOpenaiVoiceState(v);
-                }}
-              >
-                {OPENAI_TTS_VOICE_IDS.map((id) => (
-                  <option key={id} value={id}>
-                    {id}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400">
-              <input
-                type="checkbox"
-                className="rounded border-zinc-400"
-                checked={openaiRotate}
-                disabled={streaming}
-                onChange={(e) => {
-                  const on = e.target.checked;
-                  setOpenaiTtsRotateVoices(on);
-                  setOpenaiRotateState(on);
-                }}
-              />
-              Rotate voices
-            </label>
-          </>
-        ) : null}
-        <button
-          type="button"
-          onClick={async () => {
-            await resumeAudioContextAfterUserGesture();
-            speakInstruction("Testing one, two, three.", { supersede: true });
-          }}
-          className="rounded-lg border border-zinc-300 px-3 py-2 text-sm font-medium dark:border-zinc-600"
-          title="Uses the selected voice engine (browser or OpenAI) and the same playback path as agent speech"
-        >
-          Test TTS
-        </button>
-        <button
-          type="button"
-          onClick={startCamera}
-          disabled={streaming || !sessionId}
-          className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900"
-        >
-          Start camera
-        </button>
-        <button
-          type="button"
-          onClick={stopCamera}
-          disabled={!streaming}
-          className="rounded-lg border border-zinc-300 px-4 py-2 text-sm font-medium dark:border-zinc-600"
-        >
-          Stop
-        </button>
-        <span className="text-sm text-zinc-600 dark:text-zinc-400">{status}</span>
-        <span className="font-mono text-xs text-zinc-500" title="Sent to /ws/infer and /v1/agent/step">
-          {sessionId ? `session ${sessionId.slice(0, 8)}…` : "session …"}
-        </span>
-      </div>
-      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end">
-        <label className="flex min-w-[180px] flex-col gap-1 text-sm text-zinc-600 dark:text-zinc-400">
-          Detector
-          <select
-            className="rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-            value={detectorPreset}
-            onChange={(e) => setDetectorPreset(e.target.value as DetectorPreset)}
-          >
-            <option value="oiv7">Open Images v7 (~601 classes)</option>
-            <option value="coco">MS COCO (~80 classes)</option>
-          </select>
-        </label>
-        <label className="flex min-w-[200px] flex-1 flex-col gap-1 text-sm text-zinc-600 dark:text-zinc-400">
-          Camera (macOS: choose Continuity Camera / iPhone if listed)
-          <select
-            className="rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-900"
-            value={selectedDeviceId}
-            onChange={(e) => setSelectedDeviceId(e.target.value)}
-            disabled={streaming}
-          >
-            {!devicesLoaded && <option value="">Loading cameras…</option>}
-            {devicesLoaded && videoDevices.length === 0 && (
-              <option value="">No camera found</option>
-            )}
-            {devicesLoaded &&
-              videoDevices.map((d, i) => (
-                <option key={d.deviceId || `cam-${i}`} value={d.deviceId}>
-                  {d.label || `Camera ${i + 1}`}
-                </option>
-              ))}
-          </select>
-        </label>
-        <button
-          type="button"
-          onClick={() => void refreshVideoDevices()}
-          disabled={streaming}
-          className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm dark:border-zinc-600"
-        >
-          Refresh cameras
-        </button>
-      </div>
-      <p className="text-xs text-zinc-500">
-        If labels show as &quot;Camera 1&quot;, allow access once; then refresh or pick the device
-        that matches your iPhone (Continuity). Do not use <code className="font-mono">facingMode</code>{" "}
-        when a specific camera is selected.
-      </p>
-      <label className="flex flex-col gap-1 text-sm text-zinc-600 dark:text-zinc-400">
-        Inference WebSocket URL
-        <input
-          className="rounded border border-zinc-300 bg-white px-2 py-1 font-mono text-xs dark:border-zinc-600 dark:bg-zinc-900"
-          value={wsUrl}
-          onChange={(e) => setWsUrl(e.target.value)}
-          disabled={streaming}
-        />
-        <span className="text-xs text-zinc-500">
-          The app appends <code className="font-mono">?model=oiv7</code> or{" "}
-          <code className="font-mono">?model=coco</code> from the Detector control.
-        </span>
-      </label>
-      {streaming ? (
-        <div className="rounded-xl border-2 border-emerald-600/50 bg-emerald-50/90 p-4 shadow-sm dark:border-emerald-500/40 dark:bg-emerald-950/50">
-          <p className="text-xs font-semibold uppercase tracking-wide text-emerald-800 dark:text-emerald-300">
-            Follow the agent (temporary UI)
-          </p>
-          {agentNote ? (
-            <p className="mt-2 text-sm text-amber-800 dark:text-amber-300">{agentNote}</p>
-          ) : null}
-          <div className="mt-3">
-            <p className="text-xs font-medium text-emerald-900/80 dark:text-emerald-200/90">
-              Agent status (dashboard / thought)
-            </p>
-            <p className="mt-1 text-lg font-semibold leading-snug text-emerald-950 dark:text-emerald-50">
-              {agentSay || "—"}
-            </p>
+    <div className="flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden">
+      <section
+        aria-label="Live camera and perception overlay"
+        className="console-full-bleed console-viewport-scan twin-scanlines relative flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden bg-black"
+      >
+        <div className="relative flex h-full min-h-0 w-full min-w-0 flex-1 flex-col overflow-hidden bg-black">
+          <video
+            ref={videoRef}
+            className="absolute inset-0 z-0 h-full w-full min-h-0 object-cover"
+            autoPlay
+            playsInline
+            muted
+          />
+          <canvas
+            ref={overlayRef}
+            className="pointer-events-none absolute inset-0 z-[1] h-full w-full min-h-0"
+          />
+          <div className="pointer-events-none absolute inset-0 z-[1] bg-gradient-to-t from-black/45 via-transparent to-black/15" />
+
+          <TwinBrandHud
+            weekday={clockParts.weekday}
+            dateLine={clockParts.dateLine}
+            time={clockParts.time}
+            location={geoLabel}
+          />
+
+          <div className="pointer-events-none absolute right-3 top-[max(0.45rem,env(safe-area-inset-top))] z-30 sm:right-4">
+            <button
+              type="button"
+              onClick={() => setSettingsModalOpen(true)}
+              className="pointer-events-auto rounded-lg border border-white/15 bg-black/40 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-white/70 backdrop-blur-md transition-colors hover:bg-black/55 hover:text-white/90"
+            >
+              Settings
+            </button>
           </div>
-          <div className="mt-4 rounded-lg border border-emerald-800/20 bg-white/50 p-3 dark:border-emerald-400/20 dark:bg-black/20">
-            <p className="text-xs font-medium text-emerald-900/80 dark:text-emerald-200/90">
-              Voice gate (TTS prep)
-            </p>
-            <p className="mt-1 font-mono text-xs text-emerald-900/90 dark:text-emerald-100/90">
-              task_anchor: {agentTaskAnchor ? `"${agentTaskAnchor}"` : "(none)"}
-            </p>
-            <p className="mt-1 font-mono text-xs text-emerald-900/90 dark:text-emerald-100/90">
-              inferred_held (tools):{" "}
-              {agentInferredHeld ? `"${agentInferredHeld}"` : "(none)"}
-            </p>
-            {agentVoice ? (
-              <ul className="mt-2 space-y-1 font-mono text-xs text-emerald-900 dark:text-emerald-100">
-                <li>phase: {agentVoice.phase}</li>
-                <li>
-                  TTS line (spoken_line): {agentInstruction.trim() || "—"}
-                </li>
-                <li>speak (gate out): {agentVoice.speak || "—"}</li>
-                <li>
-                  should_speak: {String(agentVoice.should_speak)} · supersede:{" "}
-                  {String(agentVoice.supersede)}
-                </li>
-                <li className="text-zinc-600 dark:text-zinc-400">
-                  TTS queue (approx): {ttsQueueLen} · is_tts_playing (ref):{" "}
-                  {String(isTtsPlayingRef.current)}
-                </li>
-                {openaiTtsLabel ? (
-                  <li className="text-zinc-600 dark:text-zinc-400">{openaiTtsLabel}</li>
+
+          <div className="relative z-20 flex min-h-0 min-w-0 flex-1 flex-col pointer-events-none">
+            <div className="pointer-events-none flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-x-clip px-3 pb-[calc(1.35rem+env(safe-area-inset-bottom))] pt-2 sm:px-4 sm:pb-[calc(1.5rem+env(safe-area-inset-bottom))] sm:pt-3 lg:flex-row lg:items-stretch lg:justify-end lg:gap-4 lg:px-5 lg:pt-4">
+              <div className="relative flex min-h-0 min-w-0 flex-1 flex-col lg:block">
+                {streaming ? (
+                  <div className="pointer-events-auto mx-auto mt-auto max-h-[38vh] w-full max-w-xl overflow-y-auto rounded-xl border border-emerald-500/25 bg-emerald-950/75 p-3 shadow-lg backdrop-blur-md sm:max-h-[42vh] lg:mx-0 lg:mt-2 lg:max-w-md">
+                    <p className="mono-caps text-[10px] text-emerald-300/90">
+                      Agent
+                    </p>
+                    {agentNote ? (
+                      <p className="mt-2 font-mono text-xs text-amber-200/90">{agentNote}</p>
+                    ) : null}
+                    <p className="mt-2 text-sm font-semibold leading-snug text-emerald-50">
+                      {agentSay || "—"}
+                    </p>
+                    <div className="mt-3 rounded-lg border border-emerald-400/15 bg-black/25 p-2.5">
+                      <p className="font-mono text-[10px] text-emerald-200/80">
+                        anchor: {agentTaskAnchor ? `"${agentTaskAnchor}"` : "—"} · held:{" "}
+                        {agentInferredHeld ? `"${agentInferredHeld}"` : "—"}
+                      </p>
+                      {agentVoice ? (
+                        <ul className="mt-2 space-y-1 font-mono text-[10px] text-emerald-100/90">
+                          <li>phase: {agentVoice.phase}</li>
+                          <li>TTS: {agentInstruction.trim() || "—"}</li>
+                          <li>
+                            speak: {agentVoice.speak || "—"} · queue ~{ttsQueueLen}
+                          </li>
+                        </ul>
+                      ) : null}
+                    </div>
+                    {agentActions.length > 0 ? (
+                      <ul className="mt-2 space-y-1 font-mono text-[11px] text-emerald-100">
+                        {agentActions.map((a, i) => (
+                          <li key={`${a.name}-${i}`} className="rounded bg-black/20 px-2 py-1">
+                            <span className="font-semibold">{a.name}</span>
+                            {a.args && Object.keys(a.args).length > 0
+                              ? ` ${JSON.stringify(a.args)}`
+                              : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
                 ) : null}
-              </ul>
-            ) : (
-              <p className="mt-2 text-xs text-zinc-500">No voice object in response</p>
-            )}
+                <div
+                  className="pointer-events-none absolute left-2 top-2 hidden h-8 w-8 rounded-tl border-l-2 border-t-2 border-[rgba(59,158,255,0.35)] shadow-[0_0_24px_rgba(59,158,255,0.07)] lg:block"
+                  aria-hidden
+                />
+                <div
+                  className="pointer-events-none absolute right-2 top-2 hidden h-8 w-8 rounded-tr border-r-2 border-t-2 border-[rgba(59,158,255,0.35)] shadow-[0_0_24px_rgba(59,158,255,0.07)] lg:block"
+                  aria-hidden
+                />
+              </div>
+
+              <div
+                className={`shrink-0 overflow-hidden transition-[max-width,opacity,margin] duration-300 ease-out ${
+                  rightPanelOpen
+                    ? "ml-0 max-w-[min(308px,92vw)] opacity-100 lg:ml-2 lg:max-w-[min(308px,34vw)]"
+                    : "pointer-events-none ml-0 max-w-0 opacity-0"
+                }`}
+                aria-hidden={!rightPanelOpen}
+              >
+                <aside
+                  id="perception-panel"
+                  className="pointer-events-auto flex max-h-[min(40vh,300px)] min-h-0 w-[min(300px,92vw)] flex-col sm:max-h-[min(46vh,380px)] lg:max-h-full lg:w-[min(300px,32vw)]"
+                >
+                  <PerceptionPanel
+                    closest={closest ?? null}
+                    tracks={topByConf}
+                    depthToAccent={depthToAccent}
+                    depthHttpSrc={depthHttpSrc}
+                    depthPreviewUrl={depthPreviewUrl}
+                    depthPreviewError={depthPreviewError}
+                    streaming={streaming}
+                  />
+                </aside>
+              </div>
+            </div>
           </div>
-          <div className="mt-4">
-            <p className="text-xs font-medium text-emerald-900/80 dark:text-emerald-200/90">
-              Tool calls
-            </p>
-            {agentActions.length > 0 ? (
-              <ul className="mt-2 space-y-1.5 font-mono text-sm text-emerald-900 dark:text-emerald-100">
-                {agentActions.map((a, i) => (
-                  <li
-                    key={`${a.name}-${i}`}
-                    className="rounded-md bg-white/70 px-2 py-1.5 dark:bg-black/30"
-                  >
-                    <span className="font-semibold">{a.name}</span>
-                    {a.args && Object.keys(a.args).length > 0
-                      ? ` ${JSON.stringify(a.args)}`
-                      : ""}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">—</p>
-            )}
-          </div>
+
+          <TwinStatusBar
+            objects={detections.length}
+            wsState={wsState}
+            frameW={hudFrame?.w ?? 0}
+            frameH={hudFrame?.h ?? 0}
+            inferHz={inferHz}
+            streaming={streaming}
+            meanConfPct={
+              detections.length > 0 ? `${(meanConf * 100).toFixed(0)}%` : null
+            }
+          />
         </div>
-      ) : null}
-      <div className="relative inline-block max-w-full overflow-hidden rounded-lg border border-zinc-200 bg-black dark:border-zinc-700">
-        <video
-          ref={videoRef}
-          className="block max-h-[min(80vh,720px)] w-full object-cover"
-          autoPlay
-          playsInline
-          muted
-        />
-        <canvas
-          ref={overlayRef}
-          className="pointer-events-none absolute left-0 top-0 h-full w-full"
-        />
-      </div>
+      </section>
+
       <canvas ref={captureRef} className="hidden" aria-hidden />
-      <p className="text-xs text-zinc-500">
-        Safari: use Start camera after page load. Tab away pauses capture; WebSocket
-        reconnects with backoff. Run the Python server from <code className="font-mono">backend/</code>.
-      </p>
+
+      <SettingsModal
+        open={settingsModalOpen}
+        onClose={() => setSettingsModalOpen(false)}
+        status={status}
+        sessionId={sessionId}
+        streaming={streaming}
+        onEngageCamera={() => void startCamera()}
+        onStopCamera={stopCamera}
+        detectorPreset={detectorPreset}
+        onDetectorPresetChange={setDetectorPreset}
+        videoDevices={videoDevices}
+        selectedDeviceId={selectedDeviceId}
+        onSelectedDeviceIdChange={setSelectedDeviceId}
+        devicesLoaded={devicesLoaded}
+        onRefreshVideoDevices={() => void refreshVideoDevices()}
+        wsUrl={wsUrl}
+        onWsUrlChange={setWsUrl}
+        ttsEngine={ttsEngine}
+        onTtsEngineChange={(engine) => {
+          setTtsEngineState(engine);
+          setTtsQueueLen(0);
+        }}
+        openaiVoice={openaiVoice}
+        onOpenaiVoiceChange={(v) => {
+          setOpenaiVoiceState(v);
+        }}
+        openaiRotate={openaiRotate}
+        onOpenaiRotateChange={(on) => {
+          setOpenaiRotateState(on);
+        }}
+        openaiTtsLabel={openaiTtsLabel}
+      />
     </div>
   );
 }

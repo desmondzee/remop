@@ -4,10 +4,14 @@ Shared Ultralytics YOLO detection + MiDaS 3.1 inference for CLI webcam and FastA
 
 from __future__ import annotations
 
+import base64
+import io
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
+from PIL import Image
 import numpy as np
 import torch
 from ultralytics import YOLO
@@ -63,8 +67,74 @@ def depth_to_colormap_bgr(depth: np.ndarray) -> np.ndarray:
     return cv2.applyColorMap(norm, cv2.COLORMAP_INFERNO)
 
 
+def sanitize_depth_for_display(depth: np.ndarray) -> np.ndarray:
+    """Finite float32 depth for UI JPEG and rel_depth sampling."""
+    d = np.asarray(depth, dtype=np.float32)
+    finite = np.isfinite(d)
+    if not np.any(finite):
+        return np.ascontiguousarray(np.zeros_like(d, dtype=np.float32))
+    med = float(np.median(d[finite]))
+    d = np.nan_to_num(d, nan=med, posinf=med, neginf=med)
+    return np.ascontiguousarray(d.astype(np.float32))
+
+
+_DEPTH_PREVIEW_ERROR_MAX = 200
+
+
+def depth_raw_grayscale_jpeg_b64(
+    depth: np.ndarray,
+    *,
+    max_side: int = 320,
+    jpeg_quality: int = 72,
+) -> str:
+    """Linear grayscale MiDaS map (per-frame min–max) as small JPEG, base64."""
+    d = sanitize_depth_for_display(depth)
+    dmin, dmax = float(d.min()), float(d.max())
+    if dmax - dmin < 1e-8:
+        gray = np.full(d.shape, 128, dtype=np.uint8)
+    else:
+        gray = ((d - dmin) / (dmax - dmin) * 255.0).astype(np.uint8)
+    gray = np.ascontiguousarray(gray)
+    hh, ww = gray.shape[:2]
+    side = max(ww, hh)
+    if side > max_side:
+        scale = max_side / side
+        nw = max(1, int(ww * scale))
+        nh = max(1, int(hh * scale))
+        gray = cv2.resize(gray, (nw, nh), interpolation=cv2.INTER_AREA)
+        gray = np.ascontiguousarray(gray)
+    q = max(1, min(100, int(jpeg_quality)))
+    ok, buf = cv2.imencode(
+        ".jpg",
+        gray,
+        [int(cv2.IMWRITE_JPEG_QUALITY), q],
+    )
+    if ok and buf is not None and buf.size > 0:
+        return base64.b64encode(buf.tobytes()).decode("ascii")
+    pil = Image.fromarray(gray, mode="L")
+    bio = io.BytesIO()
+    pil.save(bio, format="JPEG", quality=q, optimize=True)
+    return base64.b64encode(bio.getvalue()).decode("ascii")
+
+
+def _depth_preview_enabled() -> bool:
+    raw = os.environ.get("INCLUDE_DEPTH_PREVIEW", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 def _detections_payload(result, depth: np.ndarray, w: int, h: int) -> dict[str, object]:
-    payload: dict[str, object] = {"w": w, "h": h, "detections": []}
+    # Plain int for JSON (avoid numpy scalar serialization issues in some stacks).
+    payload: dict[str, object] = {"w": int(w), "h": int(h), "detections": []}
+    d_safe = sanitize_depth_for_display(depth)
+    if _depth_preview_enabled():
+        try:
+            b64 = depth_raw_grayscale_jpeg_b64(d_safe)
+            if b64.strip():
+                payload["depth_jpeg_b64"] = b64
+        except Exception as e:
+            logging.exception("depth preview JPEG encode failed")
+            msg = (str(e).strip() or type(e).__name__)[:_DEPTH_PREVIEW_ERROR_MAX]
+            payload["depth_preview_error"] = msg
     boxes = result.boxes
     if boxes is None or len(boxes) == 0:
         return payload
@@ -91,7 +161,7 @@ def _detections_payload(result, depth: np.ndarray, w: int, h: int) -> dict[str, 
                 "y2": float(y2 / h),
                 "cx": float(cx / w),
                 "cy": float(cy / h),
-                "rel_depth": float(depth[v, u]),
+                "rel_depth": float(d_safe[v, u]),
             }
         )
     payload["detections"] = dets
