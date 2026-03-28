@@ -1,4 +1,4 @@
-import CameraOverlay from "./components/CameraOverlay";
+import CameraOverlayMount from "./components/CameraOverlayMount";
 
 export default function Home() {
   return (
@@ -16,7 +16,7 @@ export default function Home() {
             . Then start the camera below (requires user gesture in Safari).
           </p>
         </div>
-        <CameraOverlay />
+        <CameraOverlayMount />
       </main>
     </div>
   );

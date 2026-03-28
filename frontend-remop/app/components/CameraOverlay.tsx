@@ -3,15 +3,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getIsTtsPlaying,
+  getOpenaiTtsRotateVoices,
+  getOpenaiTtsVoice,
   getTtsEngine,
   getTtsQueueDepth,
-  prefetchKokoro,
+  OPENAI_TTS_VOICE_IDS,
   resetAgentTts,
+  resumeAudioContextAfterUserGesture,
+  setOpenaiTtsRotateVoices,
+  setOpenaiTtsVoice,
   setTtsEngine,
   speakInstruction,
-  subscribeKokoroStatus,
+  subscribeOpenaiTtsStatus,
   subscribeTtsPlaying,
   unlockAudioFromUserGesture,
+  type OpenaiTtsVoiceId,
   type TtsEngine,
 } from "../lib/agentTts";
 
@@ -144,7 +150,7 @@ export default function CameraOverlay() {
   const agentStepInFlightRef = useRef(false);
   const inferReadyRef = useRef(false);
   const sessionIdRef = useRef<string | null>(null);
-  /** True while Web Speech or Kokoro is playing or queued; drives POST is_tts_playing. */
+  /** True while Web Speech or OpenAI TTS is playing or queued; drives POST is_tts_playing. */
   const isTtsPlayingRef = useRef(false);
   const ttsPendingTimerRef = useRef<number | null>(null);
   const lastNonSupersedeTtsAtRef = useRef(0);
@@ -166,7 +172,13 @@ export default function CameraOverlay() {
   const [agentInferredHeld, setAgentInferredHeld] = useState("");
   const [ttsQueueLen, setTtsQueueLen] = useState(0);
   const [ttsEngine, setTtsEngineState] = useState<TtsEngine>(() => getTtsEngine());
-  const [kokoroLoadLabel, setKokoroLoadLabel] = useState("");
+  const [openaiVoice, setOpenaiVoiceState] = useState<OpenaiTtsVoiceId>(() =>
+    getOpenaiTtsVoice()
+  );
+  const [openaiRotate, setOpenaiRotateState] = useState(() =>
+    getOpenaiTtsRotateVoices()
+  );
+  const [openaiTtsLabel, setOpenaiTtsLabel] = useState("");
   const [agentNote, setAgentNote] = useState("");
   /** Backend LATEST_STATE exists only after at least one successful infer for this session. */
   const [inferReady, setInferReady] = useState(false);
@@ -222,11 +234,11 @@ export default function CameraOverlay() {
   }, []);
 
   useEffect(() => {
-    return subscribeKokoroStatus(({ status, detail }) => {
-      if (status === "idle") setKokoroLoadLabel("");
-      else if (status === "loading") setKokoroLoadLabel("Loading neural voice…");
-      else if (status === "ready") setKokoroLoadLabel(`Neural ready (${detail})`);
-      else setKokoroLoadLabel(`Neural error: ${detail}`);
+    return subscribeOpenaiTtsStatus(({ status, detail }) => {
+      if (status === "idle") setOpenaiTtsLabel("");
+      else if (status === "loading") setOpenaiTtsLabel(detail);
+      else if (status === "ready") setOpenaiTtsLabel(detail);
+      else setOpenaiTtsLabel(`OpenAI TTS error: ${detail}`);
     });
   }, []);
 
@@ -419,7 +431,6 @@ export default function CameraOverlay() {
       streamingRef.current = true;
       setStreaming(true);
       unlockAudioFromUserGesture();
-      if (getTtsEngine() === "kokoro") prefetchKokoro();
       setStatus(webpOk ? "Camera on (WebP)" : "Camera on (JPEG fallback)");
     } catch (e) {
       setStatus(`Camera failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -673,13 +684,65 @@ export default function CameraOverlay() {
               resetAgentTts();
               setTtsEngineState(next);
               setTtsQueueLen(0);
-              if (next === "kokoro" && streamingRef.current) prefetchKokoro();
             }}
           >
             <option value="browser">Browser (Web Speech)</option>
-            <option value="kokoro">Neural (Kokoro, on-device)</option>
+            <option value="openai">OpenAI (tts-1, cloud)</option>
           </select>
         </label>
+        {ttsEngine === "openai" ? (
+          <>
+            <label className="flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400">
+              OpenAI voice
+              <select
+                className="rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-900"
+                value={openaiVoice}
+                disabled={streaming || openaiRotate}
+                title={
+                  openaiRotate
+                    ? "Fixed voice disabled while rotating"
+                    : "OpenAI speech voice"
+                }
+                onChange={(e) => {
+                  const v = e.target.value as OpenaiTtsVoiceId;
+                  setOpenaiTtsVoice(v);
+                  setOpenaiVoiceState(v);
+                }}
+              >
+                {OPENAI_TTS_VOICE_IDS.map((id) => (
+                  <option key={id} value={id}>
+                    {id}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex cursor-pointer items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400">
+              <input
+                type="checkbox"
+                className="rounded border-zinc-400"
+                checked={openaiRotate}
+                disabled={streaming}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  setOpenaiTtsRotateVoices(on);
+                  setOpenaiRotateState(on);
+                }}
+              />
+              Rotate voices
+            </label>
+          </>
+        ) : null}
+        <button
+          type="button"
+          onClick={async () => {
+            await resumeAudioContextAfterUserGesture();
+            speakInstruction("Testing one, two, three.", { supersede: true });
+          }}
+          className="rounded-lg border border-zinc-300 px-3 py-2 text-sm font-medium dark:border-zinc-600"
+          title="Uses the selected voice engine (browser or OpenAI) and the same playback path as agent speech"
+        >
+          Test TTS
+        </button>
         <button
           type="button"
           onClick={startCamera}
@@ -802,8 +865,8 @@ export default function CameraOverlay() {
                   TTS queue (approx): {ttsQueueLen} · is_tts_playing (ref):{" "}
                   {String(isTtsPlayingRef.current)}
                 </li>
-                {kokoroLoadLabel ? (
-                  <li className="text-zinc-600 dark:text-zinc-400">{kokoroLoadLabel}</li>
+                {openaiTtsLabel ? (
+                  <li className="text-zinc-600 dark:text-zinc-400">{openaiTtsLabel}</li>
                 ) : null}
               </ul>
             ) : (

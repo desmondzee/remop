@@ -1,20 +1,32 @@
 /**
- * Agent instruction TTS: Web Speech (default) or optional Kokoro (client-side).
- * Kokoro follows hexgrad/kokoro.js: Transformers.js + ONNX + phonemizer (eSpeak), with stream
- * polyfills in `kokoro/kokoroBrowserRuntime.ts` so WebKit can iterate gzip streams.
+ * Agent instruction TTS: Web Speech (default) or OpenAI `tts-1` (cheapest) via `/api/tts`.
  * Keeps strong refs to SpeechSynthesisUtterance until onend/onerror (Chrome/Safari GC).
  * Defers speak() after cancel() to avoid engine race. Call unlockAudioFromUserGesture
- * from Start camera (same user gesture) for iOS/Safari.
+ * from Start camera (same user gesture) for iOS/Safari and AudioContext playback.
  */
 
-import {
-  ensureKokoroStreamPolyfills,
-  maskProcessNodeVersionForBrowserImport,
-} from "./kokoro/kokoroBrowserRuntime";
+export type TtsEngine = "browser" | "openai";
 
-export type TtsEngine = "browser" | "kokoro";
+/** OpenAI speech voices (all work with `tts-1`). */
+export const OPENAI_TTS_VOICE_IDS = [
+  "alloy",
+  "ash",
+  "ballad",
+  "coral",
+  "echo",
+  "fable",
+  "nova",
+  "onyx",
+  "sage",
+  "shimmer",
+  "verse",
+] as const;
+
+export type OpenaiTtsVoiceId = (typeof OPENAI_TTS_VOICE_IDS)[number];
 
 const CANCEL_DEFER_MS = 50;
+
+const OPENAI_TTS_VOICES_SET = new Set<string>(OPENAI_TTS_VOICE_IDS);
 
 /** Console: `[remop:tts]` — on in development; set NEXT_PUBLIC_TTS_DEBUG=0 to mute, =1 to force in prod. */
 const TTS_DEBUG =
@@ -27,16 +39,32 @@ function ttsLog(...args: unknown[]) {
   console.log("[remop:tts]", ...args);
 }
 
-const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
+/** Always-on logs for OpenAI `/api/tts` pipeline (filter DevTools by `[remop:tts:openai]`). */
+const OAI = "[remop:tts:openai]";
+
+function openaiLog(message: string, detail?: Record<string, unknown>) {
+  if (detail === undefined) console.log(OAI, message);
+  else console.log(OAI, message, detail);
+}
+
+function openaiWarn(message: string, detail?: unknown) {
+  console.warn(OAI, message, detail);
+}
+
+function openaiErr(message: string, detail?: unknown) {
+  console.error(OAI, message, detail);
+}
 
 function envEngine(): TtsEngine {
-  return process.env.NEXT_PUBLIC_TTS_ENGINE === "kokoro"
-    ? "kokoro"
+  return process.env.NEXT_PUBLIC_TTS_ENGINE === "openai"
+    ? "openai"
     : "browser";
 }
 
-function envKokoroVoice(): string {
-  return process.env.NEXT_PUBLIC_KOKORO_VOICE?.trim() || "af_heart";
+function envDefaultOpenaiVoice(): OpenaiTtsVoiceId {
+  const v = process.env.NEXT_PUBLIC_OPENAI_TTS_VOICE?.trim().toLowerCase() ?? "";
+  if (OPENAI_TTS_VOICES_SET.has(v)) return v as OpenaiTtsVoiceId;
+  return "alloy";
 }
 
 // --- Web Speech: GC-safe utterance retention ---
@@ -79,21 +107,28 @@ export function subscribeTtsPlaying(cb: (v: boolean) => void): () => void {
   return () => subscribers.delete(cb);
 }
 
-// --- Engine & Kokoro ---
+// --- Engine & OpenAI voice ---
 let engine: TtsEngine = envEngine();
-const kokoroVoice = envKokoroVoice();
-type LoadedKokoro = import("./kokoro/kokoroTts").KokoroTTS;
-let kokoroModel: LoadedKokoro | null = null;
-let kokoroLoadPromise: Promise<LoadedKokoro> | null = null;
-let kokoroStatus: "idle" | "loading" | "ready" | "error" = "idle";
-let kokoroStatusDetail = "";
-const kokoroStatusSubscribers = new Set<
-  (s: { status: typeof kokoroStatus; detail: string }) => void
->();
+let openaiVoice: OpenaiTtsVoiceId = envDefaultOpenaiVoice();
+let openaiRotateVoices = false;
+let openaiRotateIndex = 0;
 
-function emitKokoroStatus() {
-  const payload = { status: kokoroStatus, detail: kokoroStatusDetail };
-  kokoroStatusSubscribers.forEach((cb) => {
+export type OpenaiTtsStatus =
+  | { status: "idle"; detail: string }
+  | { status: "loading"; detail: string }
+  | { status: "ready"; detail: string }
+  | { status: "error"; detail: string };
+
+let openaiStatus: OpenaiTtsStatus["status"] = "idle";
+let openaiStatusDetail = "";
+const openaiStatusSubscribers = new Set<(s: OpenaiTtsStatus) => void>();
+
+function emitOpenaiStatus() {
+  const payload: OpenaiTtsStatus = {
+    status: openaiStatus,
+    detail: openaiStatusDetail,
+  };
+  openaiStatusSubscribers.forEach((cb) => {
     if (typeof cb === "function") {
       try {
         cb(payload);
@@ -104,12 +139,12 @@ function emitKokoroStatus() {
   });
 }
 
-export function subscribeKokoroStatus(
-  cb: (s: { status: typeof kokoroStatus; detail: string }) => void
+export function subscribeOpenaiTtsStatus(
+  cb: (s: OpenaiTtsStatus) => void
 ): () => void {
-  kokoroStatusSubscribers.add(cb);
-  cb({ status: kokoroStatus, detail: kokoroStatusDetail });
-  return () => kokoroStatusSubscribers.delete(cb);
+  openaiStatusSubscribers.add(cb);
+  cb({ status: openaiStatus, detail: openaiStatusDetail });
+  return () => openaiStatusSubscribers.delete(cb);
 }
 
 export function setTtsEngine(next: TtsEngine) {
@@ -120,7 +155,32 @@ export function getTtsEngine(): TtsEngine {
   return engine;
 }
 
-// --- AudioContext (Kokoro playback + resume on user gesture) ---
+export function setOpenaiTtsVoice(voice: string) {
+  const v = voice.trim().toLowerCase();
+  if (OPENAI_TTS_VOICES_SET.has(v)) {
+    openaiVoice = v as OpenaiTtsVoiceId;
+  }
+}
+
+export function getOpenaiTtsVoice(): OpenaiTtsVoiceId {
+  return openaiVoice;
+}
+
+export function setOpenaiTtsRotateVoices(rotate: boolean) {
+  openaiRotateVoices = rotate;
+}
+
+export function getOpenaiTtsRotateVoices(): boolean {
+  return openaiRotateVoices;
+}
+
+function pickOpenaiVoiceForLine(): OpenaiTtsVoiceId {
+  if (!openaiRotateVoices) return openaiVoice;
+  const i = openaiRotateIndex++ % OPENAI_TTS_VOICE_IDS.length;
+  return OPENAI_TTS_VOICE_IDS[i];
+}
+
+// --- AudioContext (OpenAI MP3 decode + playback) ---
 let audioContext: AudioContext | null = null;
 let unlockDone = false;
 
@@ -241,214 +301,427 @@ function browserSpeakInstruction(text: string, supersede: boolean) {
   }
 }
 
-// --- Kokoro queue ---
-const kokoroQueue: string[] = [];
-let kokoroGen = 0;
-let kokoroSerial = Promise.resolve();
-let kokoroCurrentSource: AudioBufferSourceNode | null = null;
+// --- OpenAI queue ---
+const openaiQueue: string[] = [];
+let openaiGen = 0;
+let openaiSerial = Promise.resolve();
+let openaiCurrentSource: AudioBufferSourceNode | null = null;
 
-async function ensureKokoro(): Promise<LoadedKokoro> {
-  if (kokoroModel) return kokoroModel;
-  if (kokoroLoadPromise) return kokoroLoadPromise;
-
-  kokoroStatus = "loading";
-  kokoroStatusDetail = "";
-  emitKokoroStatus();
-
-  kokoroLoadPromise = (async () => {
-    ttsLog("ensureKokoro: stream polyfills + dynamic import");
-    await ensureKokoroStreamPolyfills();
-    const unmaskNode = maskProcessNodeVersionForBrowserImport();
-    let KokoroTTS: typeof import("./kokoro/kokoroTts").KokoroTTS;
-    try {
-      ({ KokoroTTS } = await import("./kokoro/kokoroTts"));
-    } finally {
-      unmaskNode();
-    }
-    let device: "webgpu" | "wasm" = "wasm";
-    if (typeof navigator !== "undefined" && "gpu" in navigator) {
-      try {
-        const adapter = await (
-          navigator as Navigator & {
-            gpu?: { requestAdapter: () => Promise<unknown> };
-          }
-        ).gpu?.requestAdapter?.();
-        if (adapter) device = "webgpu";
-      } catch {
-        device = "wasm";
-      }
-    }
-    ttsLog("ensureKokoro: from_pretrained", KOKORO_MODEL_ID, device);
-    const model = await KokoroTTS.from_pretrained(KOKORO_MODEL_ID, {
-      dtype: "q8",
-      device,
-    });
-    if (typeof model?.generate !== "function") {
-      throw new TypeError("KokoroTTS model has no generate()");
-    }
-    kokoroModel = model;
-    kokoroStatus = "ready";
-    kokoroStatusDetail = device === "webgpu" ? "WebGPU" : "WASM";
-    emitKokoroStatus();
-    ttsLog("ensureKokoro: ready", device);
-    return model;
-  })().catch((e) => {
-    kokoroLoadPromise = null;
-    kokoroStatus = "error";
-    kokoroStatusDetail = e instanceof Error ? e.message : String(e);
-    emitKokoroStatus();
-    ttsLog("ensureKokoro: error", e);
-    throw e;
-  });
-
-  return kokoroLoadPromise;
-}
-
-/**
- * Kokoro `generate()` finishes long after the click that unlocked audio; browsers often
- * leave AudioContext "suspended" until resume() runs in the same "activation" as playback.
- * Always await resume() here (and create the context if needed) so output is audible.
- */
-async function playRawAudioToContext(
-  raw: { audio: Float32Array; sampling_rate: number }
-): Promise<void> {
-  if (typeof window === "undefined") {
-    ttsLog("playRaw: skip (no window)");
-    return;
-  }
-
-  let ctx = audioContext;
-  if (!ctx) {
+async function ensureAudioContext(): Promise<AudioContext | null> {
+  if (typeof window === "undefined") return null;
+  if (!audioContext) {
     const Ctx =
       window.AudioContext ||
       (window as unknown as { webkitAudioContext?: typeof AudioContext })
         .webkitAudioContext;
     if (!Ctx) {
-      ttsLog("playRaw: no AudioContext constructor");
-      return;
+      openaiErr("AudioContext constructor missing");
+      return null;
     }
-    ctx = new Ctx();
-    audioContext = ctx;
-    ttsLog("playRaw: created AudioContext", "sampleRate", ctx.sampleRate);
+    audioContext = new Ctx();
+    openaiLog("AudioContext created", {
+      state: audioContext.state,
+      sampleRate: audioContext.sampleRate,
+    });
+  }
+  try {
+    await audioContext.resume();
+    openaiLog("AudioContext resume ok", { state: audioContext.state });
+  } catch (e) {
+    openaiWarn("AudioContext.resume() rejected", e);
+  }
+  return audioContext;
+}
+
+async function fetchOpenaiSpeechMp3(
+  text: string,
+  voice: OpenaiTtsVoiceId
+): Promise<ArrayBuffer> {
+  const t0 =
+    typeof performance !== "undefined" ? performance.now() : 0;
+  openaiLog("POST /api/tts (sending)", {
+    voice,
+    textLength: text.length,
+    textPreview: text.slice(0, 120),
+  });
+
+  let res: Response;
+  try {
+    res = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voice }),
+    });
+  } catch (e) {
+    openaiErr("fetch failed before response (network / CORS / offline?)", e);
+    throw e;
   }
 
-  const n = raw.audio?.length ?? 0;
-  const rate = raw.sampling_rate;
-  if (n === 0 || !Number.isFinite(rate) || rate <= 0) {
-    ttsLog("playRaw: skip empty or bad rate", { n, rate, rawKeys: raw && Object.keys(raw) });
+  const elapsedMs =
+    typeof performance !== "undefined"
+      ? Math.round(performance.now() - t0)
+      : 0;
+  openaiLog("response headers", {
+    ok: res.ok,
+    status: res.status,
+    statusText: res.statusText,
+    contentType: res.headers.get("content-type"),
+    elapsedMs,
+  });
+
+  if (!res.ok) {
+    const raw = await res.text();
+    let msg = raw.slice(0, 400) || res.statusText;
+    try {
+      const j = JSON.parse(raw) as { error?: string };
+      if (typeof j.error === "string" && j.error) msg = j.error;
+    } catch {
+      /* use raw slice */
+    }
+    openaiErr("API error body", { status: res.status, msg });
+    throw new Error(msg || `TTS HTTP ${res.status}`);
+  }
+
+  const buf = await res.arrayBuffer();
+  logMp3PayloadPrefix(buf);
+  openaiLog("audio MP3 received", { byteLength: buf.byteLength });
+  return buf;
+}
+
+/** Detect JSON/HTML mistaken for audio or empty payload. */
+function logMp3PayloadPrefix(buf: ArrayBuffer): void {
+  const n = Math.min(16, buf.byteLength);
+  const u8 = new Uint8Array(buf, 0, n);
+  const hex = [...u8].map((b) => b.toString(16).padStart(2, "0")).join(" ");
+  const head =
+    n >= 3
+      ? String.fromCharCode(u8[0], u8[1], u8[2], n >= 4 ? u8[3] : 32)
+      : "";
+  const frameSync =
+    n >= 2 && u8[0] === 0xff && (u8[1] & 0xe0) === 0xe0;
+  const id3 = n >= 3 && u8[0] === 0x49 && u8[1] === 0x44 && u8[2] === 0x33;
+  const looksLikeMp3 = frameSync || id3;
+  openaiLog("payload prefix (expect MP3 frame 0xFFEx or ID3)", {
+    hex,
+    headAscii: head.trim(),
+    frameSync,
+    id3Tag: id3,
+    looksLikeMp3,
+  });
+}
+
+/**
+ * Native &lt;audio&gt; MP3 decode/output — usually more reliable than decodeAudioData for MPEG.
+ * Must wait for load events before play(); immediate play() after setting src often stays silent.
+ */
+async function playMp3ViaAudioElement(arrayBuffer: ArrayBuffer): Promise<void> {
+  const blob = new Blob([arrayBuffer], { type: "audio/mpeg" });
+  const url = URL.createObjectURL(blob);
+  const el = new Audio();
+  el.volume = 1;
+  el.muted = false;
+  el.preload = "auto";
+  el.setAttribute("playsinline", "true");
+
+  const revoke = () => {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const t = window.setTimeout(() => {
+        reject(new Error("HTMLAudio load timeout (15s)"));
+      }, 15_000);
+      const done = () => window.clearTimeout(t);
+
+      const onReady = () => {
+        openaiLog("HTMLAudio can play", {
+          duration: el.duration,
+          readyState: el.readyState,
+          networkState: el.networkState,
+          paused: el.paused,
+        });
+      };
+
+      el.addEventListener(
+        "loadedmetadata",
+        () => {
+          onReady();
+        },
+        { once: true }
+      );
+
+      el.addEventListener(
+        "canplay",
+        () => {
+          done();
+          resolve();
+        },
+        { once: true }
+      );
+
+      el.addEventListener(
+        "error",
+        () => {
+          done();
+          const code = el.error?.code;
+          const msg = el.error?.message;
+          reject(
+            new Error(
+              `HTMLAudio load error${code != null ? ` code=${code}` : ""}${msg ? `: ${msg}` : ""}`
+            )
+          );
+        },
+        { once: true }
+      );
+
+      el.src = url;
+      el.load();
+    });
+
+    if (!Number.isFinite(el.duration) || el.duration <= 0) {
+      openaiWarn("HTMLAudio duration suspicious after load", {
+        duration: el.duration,
+      });
+    }
+
+    try {
+      await el.play();
+      openaiLog("HTMLAudio play() resolved", {
+        currentTime: el.currentTime,
+        paused: el.paused,
+      });
+    } catch (e) {
+      openaiWarn("HTMLAudio play() rejected — retrying in DOM (some WebKit builds)", e);
+      el.style.display = "none";
+      el.setAttribute("aria-hidden", "true");
+      document.body.appendChild(el);
+      try {
+        await el.play();
+        openaiLog("HTMLAudio play() ok after appendChild", {
+          paused: el.paused,
+        });
+      } catch (e2) {
+        document.body.removeChild(el);
+        throw e2;
+      }
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      el.onended = () => {
+        openaiLog("HTMLAudio onended");
+        if (el.parentNode) el.parentNode.removeChild(el);
+        revoke();
+        resolve();
+      };
+      el.onerror = () => {
+        if (el.parentNode) el.parentNode.removeChild(el);
+        revoke();
+        reject(new Error("HTMLAudioElement error during playback"));
+      };
+    });
+  } catch (e) {
+    revoke();
+    throw e;
+  }
+}
+
+async function playMp3BufferWebAudio(arrayBuffer: ArrayBuffer): Promise<void> {
+  openaiLog("playMp3BufferWebAudio: start", {
+    inputBytes: arrayBuffer.byteLength,
+  });
+
+  const ctx = await ensureAudioContext();
+  if (!ctx) {
+    openaiErr("playMp3BufferWebAudio: no AudioContext after ensure");
     return;
   }
 
-  let resumed = ctx.state;
+  let audio: AudioBuffer;
+  try {
+    const copy = arrayBuffer.slice(0);
+    openaiLog("decodeAudioData: calling…", { ctxState: ctx.state });
+    audio = await ctx.decodeAudioData(copy);
+    openaiLog("decodeAudioData: ok", {
+      durationSec: audio.duration,
+      channels: audio.numberOfChannels,
+      sampleRate: audio.sampleRate,
+      length: audio.length,
+    });
+  } catch (e) {
+    openaiErr("decodeAudioData failed (bad MP3 or unsupported codec?)", e);
+    ttsLog("decodeAudioData failed", e);
+    return;
+  }
+
+  if (
+    !Number.isFinite(audio.duration) ||
+    audio.duration <= 0 ||
+    audio.length === 0
+  ) {
+    openaiErr("decodeAudioData produced empty / invalid buffer", {
+      duration: audio.duration,
+      length: audio.length,
+    });
+    return;
+  }
+
   try {
     await ctx.resume();
-    resumed = ctx.state;
   } catch (e) {
-    ttsLog("playRaw: resume() rejected", e, "state", ctx.state);
+    openaiWarn("playMp3BufferWebAudio: resume before start rejected", e);
   }
-  ttsLog("playRaw: context state after resume", resumed, "samples", n, "rate", rate);
+  openaiLog("playMp3BufferWebAudio: pre-start", {
+    ctxState: ctx.state,
+    currentTime: ctx.currentTime,
+  });
 
-  const samples = new Float32Array(raw.audio);
-
-  let buffer: AudioBuffer;
-  try {
-    buffer = ctx.createBuffer(1, n, rate);
-  } catch (e) {
-    ttsLog("playRaw: createBuffer failed", e);
+  if (ctx.state !== "running") {
+    openaiErr("Web Audio: context not running after resume", {
+      state: ctx.state,
+    });
     return;
   }
-  buffer.getChannelData(0).set(samples);
 
   const src = ctx.createBufferSource();
-  src.buffer = buffer;
+  src.buffer = audio;
   const gain = ctx.createGain();
   gain.gain.value = 1;
   src.connect(gain);
   gain.connect(ctx.destination);
-  kokoroCurrentSource = src;
+  openaiCurrentSource = src;
 
+  const startAt = ctx.currentTime;
   return new Promise((resolve) => {
     src.onended = () => {
-      if (kokoroCurrentSource === src) kokoroCurrentSource = null;
-      ttsLog("playRaw: onended");
+      openaiLog("BufferSource onended (playback finished)");
+      if (openaiCurrentSource === src) openaiCurrentSource = null;
       resolve();
     };
     try {
-      src.start();
-      ttsLog("playRaw: source.start() ok");
+      src.start(startAt);
+      openaiLog("BufferSource.start ok", {
+        startAt,
+        ctxState: ctx.state,
+      });
     } catch (e) {
-      ttsLog("playRaw: source.start() threw", e);
-      if (kokoroCurrentSource === src) kokoroCurrentSource = null;
+      openaiErr("BufferSource.start failed", e);
+      if (openaiCurrentSource === src) openaiCurrentSource = null;
       resolve();
     }
   });
 }
 
-async function drainKokoroQueue(): Promise<void> {
-  while (kokoroQueue.length > 0) {
-    const myGen = kokoroGen;
-    const line = kokoroQueue[0];
-    let model: LoadedKokoro;
-    try {
-      model = await ensureKokoro();
-    } catch (e) {
-      ttsLog("drain: ensureKokoro failed", e);
-      kokoroQueue.length = 0;
-      emitPlaying(false);
-      return;
-    }
-    if (myGen !== kokoroGen) continue;
+/** OpenAI returns MP3: prefer native &lt;audio&gt; (correct load + play order), then Web Audio. */
+async function playMp3Buffer(arrayBuffer: ArrayBuffer): Promise<void> {
+  openaiLog("playMp3Buffer: strategy = HTMLAudio first, then Web Audio", {
+    bytes: arrayBuffer.byteLength,
+  });
+  try {
+    await playMp3ViaAudioElement(arrayBuffer);
+    openaiLog("playMp3Buffer: HTMLAudio path completed");
+    return;
+  } catch (e) {
+    openaiWarn("playMp3Buffer: HTMLAudio failed, Web Audio fallback", e);
+  }
+  await playMp3BufferWebAudio(arrayBuffer);
+}
 
-    // Let the browser run pending work (WebSocket send, rAF) before ONNX blocks the main thread.
-    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+async function drainOpenaiQueue(): Promise<void> {
+  while (openaiQueue.length > 0) {
+    const myGen = openaiGen;
+    const line = openaiQueue[0];
+    const voice = pickOpenaiVoiceForLine();
 
-    ttsLog("drain: generate start", { len: line.length, voice: kokoroVoice });
-    let raw: Awaited<ReturnType<LoadedKokoro["generate"]>>;
+    openaiLog("drain: processing queue head", {
+      gen: myGen,
+      queueLen: openaiQueue.length,
+      voice,
+      lineLength: line.length,
+    });
+
+    openaiStatus = "loading";
+    openaiStatusDetail = `Requesting (${voice})…`;
+    emitOpenaiStatus();
+
+    let buf: ArrayBuffer;
     try {
-      raw = await model.generate(line, { voice: kokoroVoice, speed: 1.05 });
+      buf = await fetchOpenaiSpeechMp3(line, voice);
     } catch (e) {
-      ttsLog("drain: generate failed", e);
-      kokoroQueue.shift();
+      openaiStatus = "error";
+      openaiStatusDetail =
+        e instanceof Error ? e.message : String(e);
+      emitOpenaiStatus();
+      openaiErr("drain: fetchOpenaiSpeechMp3 threw", e);
+      ttsLog("openai TTS fetch failed", e);
+      openaiQueue.shift();
       continue;
     }
-    if (myGen !== kokoroGen) continue;
 
-    const alen = raw?.audio?.length ?? 0;
-    const sr = raw?.sampling_rate;
-    ttsLog("drain: generate done", { samples: alen, sampling_rate: sr });
+    if (myGen !== openaiGen) {
+      openaiLog("drain: skipped after fetch (superseded)", {
+        myGen,
+        openaiGen,
+      });
+      continue;
+    }
 
-    kokoroQueue.shift();
+    openaiStatus = "ready";
+    openaiStatusDetail = `OpenAI tts-1 (${voice})`;
+    emitOpenaiStatus();
+
+    openaiQueue.shift();
     emitPlaying(true);
-    await playRawAudioToContext(raw);
-    if (myGen !== kokoroGen) continue;
+    openaiLog("drain: playing…");
+    await playMp3Buffer(buf);
+    if (myGen !== openaiGen) {
+      openaiLog("drain: skipped after play (superseded)");
+      continue;
+    }
   }
+  openaiLog("drain: queue empty, emitPlaying(false)");
   emitPlaying(false);
 }
 
-function scheduleKokoroDrain() {
-  kokoroSerial = kokoroSerial.then(() => drainKokoroQueue()).catch((e) => {
-    ttsLog("drain: unhandled rejection", e);
-    kokoroQueue.length = 0;
+function scheduleOpenaiDrain() {
+  openaiLog("scheduleOpenaiDrain: chaining drain");
+  openaiSerial = openaiSerial.then(() => drainOpenaiQueue()).catch((e) => {
+    openaiErr("drainOpenaiQueue unhandled rejection", e);
+    ttsLog("openai drain error", e);
+    openaiQueue.length = 0;
+    openaiStatus = "error";
+    openaiStatusDetail = e instanceof Error ? e.message : String(e);
+    emitOpenaiStatus();
     emitPlaying(false);
   });
 }
 
-function kokoroSpeakInstruction(text: string, supersede: boolean) {
-  ttsLog("kokoroSpeakInstruction", { supersede, len: text.length, hasCtx: !!audioContext });
+function openaiSpeakInstruction(text: string, supersede: boolean) {
   if (supersede) {
-    kokoroGen++;
+    openaiGen++;
+    openaiLog("speak: supersede", { gen: openaiGen, textLength: text.length });
     try {
-      kokoroCurrentSource?.stop();
+      openaiCurrentSource?.stop();
     } catch {
       /* already stopped */
     }
-    kokoroCurrentSource = null;
-    kokoroQueue.length = 0;
-    kokoroQueue.push(text);
+    openaiCurrentSource = null;
+    openaiQueue.length = 0;
+    openaiQueue.push(text);
   } else {
-    kokoroQueue.push(text);
+    openaiLog("speak: enqueue", { textLength: text.length });
+    openaiQueue.push(text);
   }
-  scheduleKokoroDrain();
+  openaiLog("speak: queue state", {
+    queueLen: openaiQueue.length,
+    rotate: openaiRotateVoices,
+    fixedVoice: openaiVoice,
+  });
+  scheduleOpenaiDrain();
 }
 
 /** Call from the Start camera click handler (after permission) so iOS/Safari allow audio. */
@@ -482,22 +755,45 @@ export function unlockAudioFromUserGesture(): void {
       audioContext = new Ctx();
     }
   }
-  void audioContext
-    ?.resume()
-    .then(() => {
-      ttsLog("unlock: resume resolved", "state", audioContext?.state);
-    })
-    .catch((e) => {
-      ttsLog("unlock: resume rejected", e, "state", audioContext?.state);
-    });
+  const ctx = audioContext;
+  if (ctx) {
+    void ctx.resume().catch(() => {});
+    /* Same user-gesture tick: start a silent buffer so the destination graph stays eligible
+       for playback after async work (e.g. OpenAI fetch ~1s). Without this, many browsers
+       leave the context suspended or block BufferSource after the gesture expires. */
+    try {
+      const n = Math.max(128, Math.ceil(ctx.sampleRate * 0.05));
+      const silent = ctx.createBuffer(1, n, ctx.sampleRate);
+      const priming = ctx.createBufferSource();
+      priming.buffer = silent;
+      priming.connect(ctx.destination);
+      priming.start(ctx.currentTime);
+      ttsLog("unlockAudio: Web Audio primed (silent)", {
+        samples: n,
+        state: ctx.state,
+      });
+    } catch (e) {
+      ttsLog("unlockAudio: Web Audio prime failed", e);
+    }
+  }
 }
 
-/** Warm Kokoro weights after unlock (e.g. right after camera starts). */
-export function prefetchKokoro(): void {
+/**
+ * Call from a click/tap handler with `await` **before** OpenAI TTS runs its fetch (~1s).
+ * Pairs sync Web Audio priming (`unlockAudioFromUserGesture`) with an awaited
+ * `AudioContext.resume()` so autoplay policies still see user activation.
+ */
+export async function resumeAudioContextAfterUserGesture(): Promise<void> {
   if (typeof window === "undefined") return;
-  void ensureKokoro().catch(() => {
-    /* status already set */
-  });
+  unlockAudioFromUserGesture();
+  const ctx = await ensureAudioContext();
+  if (!ctx) return;
+  try {
+    await ctx.resume();
+  } catch (e) {
+    openaiWarn("resumeAudioContextAfterUserGesture: resume rejected", e);
+  }
+  openaiLog("resumeAudioContextAfterUserGesture done", { state: ctx.state });
 }
 
 export function speakInstruction(
@@ -506,8 +802,12 @@ export function speakInstruction(
 ): void {
   const t = text.trim();
   if (!t) return;
-  if (engine === "kokoro") {
-    kokoroSpeakInstruction(t, opts.supersede);
+  if (engine === "openai") {
+    openaiLog("speakInstruction → openai", {
+      supersede: opts.supersede,
+      charCount: t.length,
+    });
+    openaiSpeakInstruction(t, opts.supersede);
   } else {
     browserSpeakInstruction(t, opts.supersede);
   }
@@ -515,8 +815,8 @@ export function speakInstruction(
 
 /** Approximate queued / in-flight instruction count for debug UI. */
 export function getTtsQueueDepth(): number {
-  if (engine === "kokoro") {
-    return kokoroQueue.length + (kokoroCurrentSource ? 1 : 0);
+  if (engine === "openai") {
+    return openaiQueue.length + (openaiCurrentSource ? 1 : 0);
   }
   return browserQueue.length + (browserSpeaking ? 1 : 0);
 }
@@ -532,14 +832,18 @@ export function resetAgentTts(): void {
   browserQueue.length = 0;
   browserSpeaking = false;
 
-  kokoroGen++;
+  openaiGen++;
   try {
-    kokoroCurrentSource?.stop();
+    openaiCurrentSource?.stop();
   } catch {
     /* */
   }
-  kokoroCurrentSource = null;
-  kokoroQueue.length = 0;
+  openaiCurrentSource = null;
+  openaiQueue.length = 0;
+
+  openaiStatus = "idle";
+  openaiStatusDetail = "";
+  emitOpenaiStatus();
 
   emitPlaying(false);
 }
