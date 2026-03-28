@@ -20,59 +20,8 @@ import time
 
 import cv2
 import numpy as np
-import torch
-from ultralytics import YOLO
 
-# PyTorch Hub: pin MiDaS v3.1 tag so hub code matches dpt_swin2_tiny_256 weights (master can diverge).
-MIDAS_HUB_REPO = "isl-org/MiDaS:v3_1"
-
-
-def pick_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
-
-
-def load_midas(device: torch.device) -> tuple[torch.nn.Module, object]:
-    kwargs = {"trust_repo": True}
-    model = torch.hub.load(MIDAS_HUB_REPO, "DPT_SwinV2_T_256", pretrained=True, **kwargs)
-    model.to(device)
-    model.eval()
-    tfm = torch.hub.load(MIDAS_HUB_REPO, "transforms", **kwargs)
-    transform = tfm.swin256_transform
-    return model, transform
-
-
-@torch.inference_mode()
-def infer_depth_map(
-    frame_bgr: np.ndarray,
-    model: torch.nn.Module,
-    transform,
-    device: torch.device,
-) -> np.ndarray:
-    h, w = frame_bgr.shape[:2]
-    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    batch = transform(rgb).to(device)
-    pred = model(batch)
-    if isinstance(pred, (list, tuple)):
-        pred = pred[-1]
-    pred = pred.squeeze()
-    if pred.ndim != 2:
-        pred = pred.reshape(pred.shape[-2], pred.shape[-1])
-    pred_np = pred.detach().float().cpu().numpy()
-    return cv2.resize(pred_np, (w, h), interpolation=cv2.INTER_LINEAR)
-
-
-def depth_to_colormap_bgr(depth: np.ndarray) -> np.ndarray:
-    d = depth.astype(np.float32)
-    dmin, dmax = float(d.min()), float(d.max())
-    if dmax - dmin < 1e-8:
-        norm = np.zeros_like(d, dtype=np.uint8)
-    else:
-        norm = ((d - dmin) / (dmax - dmin) * 255.0).astype(np.uint8)
-    return cv2.applyColorMap(norm, cv2.COLORMAP_INFERNO)
+from vision_pipeline import VisionPipeline, depth_to_colormap_bgr, pick_device
 
 
 def parse_args() -> argparse.Namespace:
@@ -112,20 +61,9 @@ def main() -> int:
         return 1
 
     try:
-        yolo = YOLO(args.model)
+        pipeline = VisionPipeline(args.model, device=device)
     except Exception as e:
-        print(f"Error loading YOLO model: {e}", file=sys.stderr)
-        cap.release()
-        return 1
-
-    try:
-        midas_model, midas_transform = load_midas(device)
-    except Exception as e:
-        print(
-            f"Error loading MiDaS from hub ({MIDAS_HUB_REPO}). "
-            f"Ensure timm is compatible (see requirements). Cause: {e}",
-            file=sys.stderr,
-        )
+        print(f"Error loading models: {e}", file=sys.stderr)
         cap.release()
         return 1
 
@@ -140,15 +78,11 @@ def main() -> int:
                 print("End of stream or read failure.", file=sys.stderr)
                 break
 
-            h, w = frame.shape[:2]
-            results = yolo.predict(frame, verbose=False)
-            result = results[0]
-
             try:
-                depth = infer_depth_map(frame, midas_model, midas_transform, device)
+                _payload, result, depth = pipeline.infer_with_result(frame)
             except Exception as e:
-                print(f"MiDaS inference error: {e}", file=sys.stderr)
-                depth = np.zeros((h, w), dtype=np.float32)
+                print(f"Inference error: {e}", file=sys.stderr)
+                continue
 
             vis = result.plot()
 
@@ -177,6 +111,7 @@ def main() -> int:
                 if boxes is None or len(boxes) == 0:
                     print(f"[{ts}] (no detections)")
                 else:
+                    h, w = frame.shape[:2]
                     names = result.names
                     xyxy = boxes.xyxy.cpu().numpy()
                     cls = boxes.cls.cpu().numpy().astype(int)
