@@ -46,6 +46,15 @@ def _detection_matches_anchor(g: dict[str, Any], tokens: set[str]) -> bool:
     return False
 
 
+def _detection_matches_held(g: dict[str, Any], held_lower: str) -> bool:
+    if not held_lower:
+        return False
+    c = _class_key(g)
+    if not c:
+        return False
+    return c == held_lower or held_lower in c or c in held_lower
+
+
 def _dedupe_preserve_order(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: set[tuple[Any, ...]] = set()
     out: list[dict[str, Any]] = []
@@ -62,6 +71,7 @@ def prioritize_grounded_for_model(
     grounded: list[dict[str, Any]],
     task_anchor: str,
     *,
+    inferred_held_object: str = "",
     top_match: int | None = None,
     top_rest: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -69,6 +79,8 @@ def prioritize_grounded_for_model(
     If task_anchor is empty, return a shallow copy of grounded (no reorder).
     Else: all urgent-class detections first (by conf), then up to top_match
     anchor-aligned detections, then up to top_rest other detections (by conf).
+    When inferred_held_object is set, prefer non-held classes in the rest slots
+    so placement anchors (table, bin) surface before the held item blob.
     """
     gcopy = [dict(x) for x in grounded]
     anchor = (task_anchor or "").strip().lower()
@@ -94,5 +106,16 @@ def prioritize_grounded_for_model(
     matches.sort(key=_conf, reverse=True)
     non_matches.sort(key=_conf, reverse=True)
 
-    selected = urgent + matches[:tm] + non_matches[:tr]
+    held_l = (inferred_held_object or "").strip().lower()
+    if held_l and tr > 0:
+        rest_other = [x for x in non_matches if not _detection_matches_held(x, held_l)]
+        rest_heldish = [x for x in non_matches if _detection_matches_held(x, held_l)]
+        rest_other.sort(key=_conf, reverse=True)
+        rest_heldish.sort(key=_conf, reverse=True)
+        rest_pool = rest_other + rest_heldish
+        rest_sel = rest_pool[:tr]
+    else:
+        rest_sel = non_matches[:tr]
+
+    selected = urgent + matches[:tm] + rest_sel
     return _dedupe_preserve_order(selected)

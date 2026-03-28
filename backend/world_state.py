@@ -12,6 +12,30 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent_tools import Action, action_args_dict
+from voice_gate import VoiceGateResult
+
+
+def _held_object_max_len() -> int:
+    return max(16, min(256, int(os.environ.get("AGENT_HELD_OBJECT_MAX_LEN", "128"))))
+
+
+def apply_inferred_held_after_actions(current: str, actions: list[Action]) -> str:
+    """
+    Walk this tick's actions in order: place/drop clear; pick_up sets target if present.
+    pick_up without target leaves previous held unchanged.
+    """
+    held = (current or "").strip()
+    cap = _held_object_max_len()
+    for a in actions:
+        if a.name in ("place", "drop"):
+            held = ""
+        elif a.name == "pick_up":
+            t = action_args_dict(a).get("target")
+            if isinstance(t, str) and t.strip():
+                held = t.strip()[:cap]
+    return held[:cap] if held else ""
+
 
 def _task_anchor_max_len() -> int:
     return max(8, min(512, int(os.environ.get("AGENT_TASK_ANCHOR_MAX_LEN", "128"))))
@@ -61,6 +85,10 @@ class _SessionBrainState:
     turn_log: list[dict[str, Any]] = field(default_factory=list)
     last_step_monotonic: float = 0.0
     last_issued_action_labels: list[str] = field(default_factory=list)
+    voice_last_speak_text: str = ""
+    voice_last_speak_monotonic: float = 0.0
+    voice_last_motor_fingerprint: str = ""
+    inferred_held_object: str = ""
 
     def __post_init__(self) -> None:
         if self.recent_action_labels is None:
@@ -137,6 +165,10 @@ async def get_memory_for_prompt(session_id: str) -> dict[str, Any]:
                 "seconds_since_last_step": None,
                 "last_issued_action_labels": [],
                 "recent_action_labels": [],
+                "voice_last_speak_text": "",
+                "voice_last_speak_monotonic": 0.0,
+                "voice_last_motor_fingerprint": "",
+                "inferred_held_object": "",
             }
         sec: float | None = None
         if st.last_step_monotonic > 0.0:
@@ -150,6 +182,10 @@ async def get_memory_for_prompt(session_id: str) -> dict[str, Any]:
             "seconds_since_last_step": sec,
             "last_issued_action_labels": list(st.last_issued_action_labels),
             "recent_action_labels": list(st.recent_action_labels or []),
+            "voice_last_speak_text": st.voice_last_speak_text,
+            "voice_last_speak_monotonic": st.voice_last_speak_monotonic,
+            "voice_last_motor_fingerprint": st.voice_last_motor_fingerprint,
+            "inferred_held_object": st.inferred_held_object,
         }
 
 
@@ -181,15 +217,20 @@ async def update_memory_after_agent_success(
     say: str,
     action_labels: list[str],
     task_anchor_model: str,
+    actions: list[Action] | None = None,
     recent_max: int = 5,
-) -> str:
+) -> tuple[str, str]:
     """
-    Merge tri-state task_anchor, append turn log, update timing and last-issued labels.
-    Returns the stored task_anchor after merge (for API response).
+    Merge tri-state task_anchor, append turn log, update timing, inferred held object, last-issued labels.
+    Returns (stored task_anchor, inferred_held_object) for API response.
     """
     async with _lock:
         st = _sessions.setdefault(session_id, _SessionBrainState())
         st.task_anchor = merge_task_anchor_from_model(st.task_anchor, task_anchor_model)
+        if actions is not None:
+            st.inferred_held_object = apply_inferred_held_after_actions(
+                st.inferred_held_object, actions
+            )
         st.turn_log.append(
             {
                 "say": say,
@@ -207,7 +248,22 @@ async def update_memory_after_agent_success(
         assert st.recent_action_labels is not None
         st.recent_action_labels.extend(action_labels)
         st.recent_action_labels = st.recent_action_labels[-recent_max:]
-        return st.task_anchor
+        return st.task_anchor, st.inferred_held_object
+
+
+async def commit_voice_gate_result(session_id: str, result: VoiceGateResult) -> None:
+    """Persist voice layer when the gate commits a speak (resets dwell clock)."""
+    if not result.payload.should_speak:
+        return
+    async with _lock:
+        st = _sessions.get(session_id)
+        if not st:
+            return
+        p = result.payload
+        st.voice_last_speak_text = p.speak
+        st.voice_last_speak_monotonic = time.monotonic()
+        if result.commit_reason == "motor" and result.motor_fingerprint:
+            st.voice_last_motor_fingerprint = result.motor_fingerprint
 
 
 async def try_begin_agent_work(session_id: str, min_interval_ms: float) -> tuple[bool, str]:

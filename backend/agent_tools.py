@@ -42,7 +42,9 @@ _TASK_ANCHOR_DESC = (
 
 
 class AgentResponse(BaseModel):
-    say: str = Field(description="Short human-facing instruction (one sentence).")
+    say: str = Field(
+        description="One short sentence for the human, suitable for text-to-speech; no tool names or JSON."
+    )
     actions: list[Action] = Field(default_factory=list)
     task_anchor: str = Field(
         default="",
@@ -77,15 +79,17 @@ Examples:
 - move_backward: args_json "{\\"steps\\":1}"
 - turn_left: args_json "{\\"degrees\\":30}"
 - turn_right: args_json "{\\"degrees\\":30}"
-- pick_up: args_json "{\\"target\\":\\"cup\\"}"
-- drop: args_json "{}"
-- place: args_json "{\\"target\\":\\"bottle\\",\\"near\\":\\"bin\\"}"
+- pick_up: args_json "{\\"target\\":\\"cup\\"}" — request the human to grasp; target MUST match a visible grounded "class" string. This is a request, not confirmation that the object is already in hand.
+- drop: args_json "{}" — release whatever is held; clears inferred holding state.
+- place: args_json "{\\"target\\":\\"shoe\\",\\"near\\":\\"table\\"}" — put the currently held object near a surface or container. "near" MUST be an exact class string from the current grounded list (e.g. table, bin, shelf), not vague words like "away" or "somewhere".
 - look_around: args_json "{}"
 - wait: args_json "{}" or "{\\"seconds\\":2}"
 Use "{}" when there are no parameters.
 
 wait: Hold your position when a physical action is still in progress or the scene is settling (e.g. after motion).
 Do not use wait instead of look_around, turning, or CLEAR when the anchored object is missing from the detection list.
+
+pick_up vs holding: If the session line says you are already inferring a held target and that class still appears in detections, treat that detection as likely the object in hand (first-person view). Do NOT issue another pick_up for the same held class until place or drop has cleared it.
 
 task_anchor field:
 - "" = keep current session anchor.

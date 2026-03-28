@@ -20,10 +20,20 @@ function inferHttpBaseFromWs(wsUrl: string): string {
 
 type AgentAction = { name: string; args: Record<string, unknown> };
 
+type AgentVoice = {
+  speak: string;
+  should_speak: boolean;
+  supersede: boolean;
+  phase: string;
+};
+
 type AgentStepOk = {
   say: string;
   actions: AgentAction[];
   state_version?: number;
+  task_anchor?: string;
+  inferred_held_object?: string;
+  voice?: AgentVoice;
 };
 
 function parseFastApiDetail(detail: unknown): string {
@@ -115,6 +125,11 @@ export default function CameraOverlay() {
   const agentStepInFlightRef = useRef(false);
   const inferReadyRef = useRef(false);
   const sessionIdRef = useRef<string | null>(null);
+  /** True while HTMLAudioElement is producing sound (future Kokoro); drives POST is_tts_playing. */
+  const isTtsPlayingRef = useRef(false);
+  const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
+  /** Stub queue for TTS lines until Kokoro is wired; supersede replaces, else append. */
+  const ttsQueueRef = useRef<string[]>([]);
 
   const [streaming, setStreaming] = useState(false);
   const [status, setStatus] = useState("Idle — click Start camera");
@@ -127,6 +142,10 @@ export default function CameraOverlay() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [agentSay, setAgentSay] = useState("");
   const [agentActions, setAgentActions] = useState<AgentAction[]>([]);
+  const [agentVoice, setAgentVoice] = useState<AgentVoice | null>(null);
+  const [agentTaskAnchor, setAgentTaskAnchor] = useState("");
+  const [agentInferredHeld, setAgentInferredHeld] = useState("");
+  const [ttsQueueLen, setTtsQueueLen] = useState(0);
   const [agentNote, setAgentNote] = useState("");
   /** Backend LATEST_STATE exists only after at least one successful infer for this session. */
   const [inferReady, setInferReady] = useState(false);
@@ -172,6 +191,31 @@ export default function CameraOverlay() {
         ? crypto.randomUUID()
         : `sid-${Date.now()}`;
     queueMicrotask(() => setSessionId(id));
+  }, []);
+
+  useEffect(() => {
+    const el = ttsAudioRef.current;
+    if (!el) return;
+    const setPlaying = (v: boolean) => {
+      isTtsPlayingRef.current = v;
+    };
+    const onPlaying = () => setPlaying(true);
+    const onEnded = () => {
+      setPlaying(false);
+      // TODO(kokoro): shift ttsQueueRef, play next clip on el.src / decodeAudioData
+    };
+    const onPause = () => {
+      if (el.currentTime > 0 && !el.ended) return;
+      setPlaying(false);
+    };
+    el.addEventListener("playing", onPlaying);
+    el.addEventListener("ended", onEnded);
+    el.addEventListener("pause", onPause);
+    return () => {
+      el.removeEventListener("playing", onPlaying);
+      el.removeEventListener("ended", onEnded);
+      el.removeEventListener("pause", onPause);
+    };
   }, []);
 
   const connectWs = useCallback(() => {
@@ -447,7 +491,13 @@ export default function CameraOverlay() {
       try {
         const r = await fetch(
           `${base}/v1/agent/step?session_id=${encodeURIComponent(sid)}`,
-          { method: "POST" }
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              is_tts_playing: isTtsPlayingRef.current,
+            }),
+          }
         );
         const text = await r.text();
         let body: unknown;
@@ -474,6 +524,39 @@ export default function CameraOverlay() {
         if (ok && typeof ok.say === "string") {
           setAgentSay(ok.say);
           setAgentActions(Array.isArray(ok.actions) ? ok.actions : []);
+          setAgentTaskAnchor(
+            typeof ok.task_anchor === "string" ? ok.task_anchor : ""
+          );
+          setAgentInferredHeld(
+            typeof ok.inferred_held_object === "string"
+              ? ok.inferred_held_object
+              : ""
+          );
+          const v = ok.voice;
+          setAgentVoice(
+            v &&
+              typeof v.speak === "string" &&
+              typeof v.should_speak === "boolean" &&
+              typeof v.supersede === "boolean" &&
+              typeof v.phase === "string"
+              ? v
+              : null
+          );
+          if (
+            v &&
+            typeof v.speak === "string" &&
+            v.should_speak
+          ) {
+            // TODO(kokoro): feed v.speak to on-device synth instead of queue stub
+            if (v.supersede) {
+              ttsQueueRef.current = [v.speak];
+              setTtsQueueLen(1);
+              ttsAudioRef.current?.pause();
+            } else {
+              ttsQueueRef.current.push(v.speak);
+              setTtsQueueLen(ttsQueueRef.current.length);
+            }
+          }
           setAgentNote("");
         }
       } catch (e) {
@@ -618,6 +701,34 @@ export default function CameraOverlay() {
               {agentSay || "—"}
             </p>
           </div>
+          <div className="mt-4 rounded-lg border border-emerald-800/20 bg-white/50 p-3 dark:border-emerald-400/20 dark:bg-black/20">
+            <p className="text-xs font-medium text-emerald-900/80 dark:text-emerald-200/90">
+              Voice gate (TTS prep)
+            </p>
+            <p className="mt-1 font-mono text-xs text-emerald-900/90 dark:text-emerald-100/90">
+              task_anchor: {agentTaskAnchor ? `"${agentTaskAnchor}"` : "(none)"}
+            </p>
+            <p className="mt-1 font-mono text-xs text-emerald-900/90 dark:text-emerald-100/90">
+              inferred_held (tools):{" "}
+              {agentInferredHeld ? `"${agentInferredHeld}"` : "(none)"}
+            </p>
+            {agentVoice ? (
+              <ul className="mt-2 space-y-1 font-mono text-xs text-emerald-900 dark:text-emerald-100">
+                <li>phase: {agentVoice.phase}</li>
+                <li>speak: {agentVoice.speak || "—"}</li>
+                <li>
+                  should_speak: {String(agentVoice.should_speak)} · supersede:{" "}
+                  {String(agentVoice.supersede)}
+                </li>
+                <li className="text-zinc-600 dark:text-zinc-400">
+                  TTS queue (stub): {ttsQueueLen} · is_tts_playing (ref):{" "}
+                  {String(isTtsPlayingRef.current)}
+                </li>
+              </ul>
+            ) : (
+              <p className="mt-2 text-xs text-zinc-500">No voice object in response</p>
+            )}
+          </div>
           <div className="mt-4">
             <p className="text-xs font-medium text-emerald-900/80 dark:text-emerald-200/90">
               Tool calls
@@ -656,6 +767,7 @@ export default function CameraOverlay() {
         />
       </div>
       <canvas ref={captureRef} className="hidden" aria-hidden />
+      <audio ref={ttsAudioRef} className="hidden" playsInline aria-hidden />
       <p className="text-xs text-zinc-500">
         Safari: use Start camera after page load. Tab away pauses capture; WebSocket
         reconnects with backoff. Run the Python server from <code className="font-mono">backend/</code>.

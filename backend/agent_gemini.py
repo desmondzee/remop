@@ -19,7 +19,7 @@ from agent_tools import (
 
 _client: genai.Client | None = None
 
-DEFAULT_HIGH_LEVEL_INTENTION = """You are the high-level planner for a household tidying assistant (like a home robot).
+DEFAULT_HIGH_LEVEL_INTENTION = """You are a curious and helpful high-level planner for a household tidying assistant (like a home robot).
 Your ongoing intention is to keep living spaces orderly: notice clutter such as shoes, bottles, clothes, or loose objects on the floor or messy surfaces;
 guide the human to pick items up when it makes sense, pair or group related things (e.g. shoes together), and place them neatly in sensible locations (shelves, bins, tables).
 Work step by step; prefer safe, practical moves the human can actually perform."""
@@ -31,12 +31,22 @@ CONTINUITY_AND_ANCHOR_RULES = """
 - If the stored task_anchor refers to an object class that is NOT in the current grounded detection list, do not rely on wait alone. Either re-acquire the scene (look_around, turn, scan) OR set task_anchor to CLEAR and choose a useful next step from what is visible. Do not spin or spam wait for objects you cannot see.
 """
 
+PHYSICAL_EVIDENCE_AND_HOLDING = """
+## Physical evidence, say, and tools
+- Tools are requests to the human, not facts. Do not use past tense in say for pick_up, place, drop, or motion unless the current image and grounding support completion (e.g. object gone from floor, clear interaction, or last outcome / human feedback says so).
+- Right after pick_up in actions, say should stay imperative or ask them to hold steady while you verify; use wait and/or look_around before claiming success.
+- Choose placement yourself: use place with target and near drawn from visible grounded classes. Do not ask the human an open-ended "where should I put it?" in say unless last outcome explicitly requires it.
+- If the user message includes an inferred held target matching a detection class, assume that detection may be the object in hand in first-person view. Do NOT issue pick_up again for that same held class; proceed toward place using other visible classes as near targets.
+- If last outcome / human feedback contradicts what you see (e.g. they dropped the item), align say and actions; use CLEAR or a new anchor if needed.
+"""
+
 PERCEPTION_AND_SCHEMA_BLOCK = f"""You see one still frame (WebP) plus a JSON list of grounded objects. Fields use normalized image coordinates cx, cy in [0,1].
 cz is a rough step-equivalent forward distance from monocular depth (calibrated constant K), NOT metric LIDAR—use only for ordering near vs far and coarse approach.
 
 {ACTION_REGISTRY_PROMPT}
 
 Output valid JSON only matching the schema: say, actions, and task_anchor.
+The say field must be one complete sentence suitable to read aloud to the human; do not put tool names or JSON inside say.
 Be concise. Prefer one clear next step. Safety first."""
 
 
@@ -52,6 +62,8 @@ def _system_instruction() -> str:
         + "\n\n## Role and perception\n"
         "You coordinate a human who is your hands and eyes in the real world from a first-person camera.\n\n"
         + CONTINUITY_AND_ANCHOR_RULES
+        + "\n"
+        + PHYSICAL_EVIDENCE_AND_HOLDING
         + "\n"
         + PERCEPTION_AND_SCHEMA_BLOCK
     )
@@ -99,6 +111,7 @@ def _user_text(
     turn_log_excerpt: str,
     seconds_since_last_step: float | None,
     last_issued_action_labels: list[str],
+    inferred_held_object: str = "",
 ) -> str:
     parts = [
         "Grounded objects (JSON array):",
@@ -108,6 +121,16 @@ def _user_text(
         parts.append(f"Stored task_anchor (session): {task_anchor}")
     else:
         parts.append("Stored task_anchor (session): (none — free exploration)")
+    ih = (inferred_held_object or "").strip()
+    if ih:
+        parts.append(
+            f'Session tool-inference: last requested holding target: "{ih}". '
+            "Verify in the image before claiming the human is holding it; infer cleared after place or drop."
+        )
+    else:
+        parts.append(
+            "Session tool-inference: no object inferred as held (or cleared after place/drop)."
+        )
     if turn_log_excerpt:
         parts.append("Recent turn log (newest last, one JSON object per line):\n" + turn_log_excerpt)
     if recent_actions:
@@ -135,7 +158,10 @@ def _user_text(
     if goal:
         parts.append(f"Current goal: {goal}")
     if last_outcome:
-        parts.append(f"Last outcome / human feedback: {last_outcome}")
+        parts.append(
+            f"Last outcome / human feedback: {last_outcome} "
+            "(Trust this over your assumptions if it contradicts the scene.)"
+        )
     parts.append("What should the human do next?")
     return "\n".join(parts)
 
@@ -151,6 +177,7 @@ def run_agent_sync(
     turn_log_excerpt: str = "",
     seconds_since_last_step: float | None = None,
     last_issued_action_labels: list[str] | None = None,
+    inferred_held_object: str = "",
 ) -> AgentResponse:
     client = _get_client()
     last_issued = list(last_issued_action_labels or [])
@@ -163,6 +190,7 @@ def run_agent_sync(
         turn_log_excerpt=turn_log_excerpt,
         seconds_since_last_step=seconds_since_last_step,
         last_issued_action_labels=last_issued,
+        inferred_held_object=inferred_held_object,
     )
     image_part = types.Part.from_bytes(data=frame_webp, mime_type="image/webp")
     text_part = types.Part.from_text(text=user)
@@ -200,6 +228,7 @@ async def run_agent(
     turn_log_excerpt: str = "",
     seconds_since_last_step: float | None = None,
     last_issued_action_labels: list[str] | None = None,
+    inferred_held_object: str = "",
 ) -> AgentResponse:
     return await asyncio.to_thread(
         run_agent_sync,
@@ -212,6 +241,7 @@ async def run_agent(
         turn_log_excerpt=turn_log_excerpt,
         seconds_since_last_step=seconds_since_last_step,
         last_issued_action_labels=last_issued_action_labels,
+        inferred_held_object=inferred_held_object,
     )
 
 

@@ -10,6 +10,7 @@ import asyncio
 import os
 from io import BytesIO
 from pathlib import Path
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 
@@ -18,7 +19,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
@@ -27,7 +28,9 @@ from agent_gemini import format_action_label, run_agent
 from agent_tools import action_to_api_dict
 from perception_postprocess import postprocess_frame_for_agent
 from vision_pipeline import VisionPipeline, pick_device
+from voice_gate import compute_voice_gate
 from world_state import (
+    commit_voice_gate_result,
     copy_snapshot,
     finish_agent_work,
     get_memory_for_prompt,
@@ -155,7 +158,9 @@ async def agent_step(
     ),
     goal: str | None = Query(None),
     last_outcome: str | None = Query(None),
+    payload: Optional[dict[str, Any]] = Body(default=None),
 ) -> dict:
+    is_tts_playing = bool(payload.get("is_tts_playing")) if isinstance(payload, dict) else False
     sid = _session_id(session_id)
     snap = await copy_snapshot(sid)
     if snap is None:
@@ -178,13 +183,21 @@ async def agent_step(
 
     memory = await get_memory_for_prompt(sid)
     effective_anchor = str(memory.get("task_anchor") or "")
-    grounded_for_model = prioritize_grounded_for_model(snap.grounded, effective_anchor)
+    inferred_held = str(memory.get("inferred_held_object") or "")
+    grounded_for_model = prioritize_grounded_for_model(
+        snap.grounded,
+        effective_anchor,
+        inferred_held_object=inferred_held,
+    )
     recent = list(memory.get("recent_action_labels") or [])
     sec_since = memory.get("seconds_since_last_step")
     if sec_since is not None and not isinstance(sec_since, (int, float)):
         sec_since = None
     last_issued = list(memory.get("last_issued_action_labels") or [])
     turn_excerpt = str(memory.get("turn_log_excerpt") or "")
+    vlst = str(memory.get("voice_last_speak_text") or "")
+    vlsm = float(memory.get("voice_last_speak_monotonic") or 0.0)
+    vlmf = str(memory.get("voice_last_motor_fingerprint") or "")
 
     try:
         result = await run_agent(
@@ -197,24 +210,45 @@ async def agent_step(
             turn_log_excerpt=turn_excerpt,
             seconds_since_last_step=sec_since,
             last_issued_action_labels=last_issued,
+            inferred_held_object=inferred_held,
         )
     except Exception as e:
         await finish_agent_work(sid, success=False)
         raise HTTPException(status_code=502, detail=f"Gemini error: {e}") from e
 
     labels = [format_action_label(a) for a in result.actions]
-    stored_anchor = await update_memory_after_agent_success(
+    stored_anchor, inferred_held_out = await update_memory_after_agent_success(
         sid,
         say=result.say,
         action_labels=labels,
         task_anchor_model=result.task_anchor or "",
+        actions=result.actions,
     )
+    voice_res = compute_voice_gate(
+        anchor_before=effective_anchor,
+        anchor_after=stored_anchor,
+        actions=result.actions,
+        say=result.say,
+        voice_last_speak_text=vlst,
+        voice_last_speak_monotonic=vlsm,
+        voice_last_motor_fingerprint=vlmf,
+        is_tts_playing=is_tts_playing,
+    )
+    await commit_voice_gate_result(sid, voice_res)
     await finish_agent_work(sid, success=True)
+    vp = voice_res.payload
     return {
         "say": result.say,
         "actions": [action_to_api_dict(a) for a in result.actions],
         "state_version": snap.version,
         "task_anchor": stored_anchor,
+        "inferred_held_object": inferred_held_out,
+        "voice": {
+            "speak": vp.speak,
+            "should_speak": vp.should_speak,
+            "phase": vp.phase,
+            "supersede": vp.supersede,
+        },
     }
 
 
