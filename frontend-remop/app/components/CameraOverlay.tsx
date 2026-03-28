@@ -43,6 +43,8 @@ type AgentVoice = {
 type AgentStepOk = {
   say: string;
   instruction?: string;
+  /** Effective line sent to the voice gate / TTS (model instruction or tool-derived). */
+  spoken_line?: string;
   actions: AgentAction[];
   state_version?: number;
   task_anchor?: string;
@@ -556,7 +558,11 @@ export default function CameraOverlay() {
         if (ok && typeof ok.say === "string") {
           setAgentSay(ok.say);
           setAgentInstruction(
-            typeof ok.instruction === "string" ? ok.instruction : ""
+            typeof ok.spoken_line === "string"
+              ? ok.spoken_line
+              : typeof ok.instruction === "string"
+                ? ok.instruction
+                : ""
           );
           setAgentActions(Array.isArray(ok.actions) ? ok.actions : []);
           setAgentTaskAnchor(
@@ -785,7 +791,7 @@ export default function CameraOverlay() {
               <ul className="mt-2 space-y-1 font-mono text-xs text-emerald-900 dark:text-emerald-100">
                 <li>phase: {agentVoice.phase}</li>
                 <li>
-                  instruction (model): {agentInstruction.trim() || "—"}
+                  TTS line (spoken_line): {agentInstruction.trim() || "—"}
                 </li>
                 <li>speak (gate out): {agentVoice.speak || "—"}</li>
                 <li>

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from agent_tools import (
     AgentResponse,
     action_args_dict,
 )
+from executors import AGENT
 from gemini_session_log import append_gemini_log
 
 _client: genai.Client | None = None
@@ -76,7 +78,7 @@ cz is a rough step-equivalent forward distance from monocular depth (calibrated 
 
 Output valid JSON only matching the schema: thought, instruction, actions, and task_anchor.
 - thought: operator dashboard only (status, reasoning, conversational allowed). Not read aloud.
-- instruction: text-to-speech only when non-empty; second-person imperatives; empty when waiting with nothing new to say aloud. Follow the instruction field rules in the schema (banned words, no questions).
+- instruction: preferred TTS line; second-person imperatives; follow schema (banned words, no questions). If empty, the server still announces each action (e.g. look_around → Look around).
 - task_anchor: do not output punctuation-only or whitespace-only anchors; use "" to keep, CLEAR to clear, or a short object class name.
 Be concise. Prefer one clear next step. Safety first."""
 
@@ -196,7 +198,7 @@ def _user_text(
         )
     parts.append(
         "Respond with JSON: one physical next step for the human and the matching actions. "
-        "Use thought for operator-facing status; use instruction only for a short imperative spoken line, or \"\" if nothing new to say aloud."
+        "Use thought for operator-facing status; use instruction for a short imperative spoken line when you want specific wording—otherwise leave instruction empty and the server will still announce each tool in actions aloud."
     )
     return "\n".join(parts)
 
@@ -307,19 +309,23 @@ async def run_agent(
     inferred_held_object: str = "",
     session_id: str = "",
 ) -> AgentResponse:
-    return await asyncio.to_thread(
-        run_agent_sync,
-        frame_webp,
-        grounded,
-        recent_actions=recent_actions,
-        goal=goal,
-        last_outcome=last_outcome,
-        task_anchor=task_anchor,
-        turn_log_excerpt=turn_log_excerpt,
-        seconds_since_last_step=seconds_since_last_step,
-        last_issued_action_labels=last_issued_action_labels,
-        inferred_held_object=inferred_held_object,
-        session_id=session_id,
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        AGENT,
+        functools.partial(
+            run_agent_sync,
+            frame_webp,
+            grounded,
+            recent_actions=recent_actions,
+            goal=goal,
+            last_outcome=last_outcome,
+            task_anchor=task_anchor,
+            turn_log_excerpt=turn_log_excerpt,
+            seconds_since_last_step=seconds_since_last_step,
+            last_issued_action_labels=last_issued_action_labels,
+            inferred_held_object=inferred_held_object,
+            session_id=session_id,
+        ),
     )
 
 

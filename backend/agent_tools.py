@@ -46,11 +46,11 @@ _THOUGHT_DESC = (
 )
 
 _INSTRUCTION_DESC = (
-    "Exact line for text-to-speech only when non-empty. Disembodied director: second-person imperatives only "
-    "(e.g. Turn left thirty degrees, Hold steady, Pick up the cup, Pan the camera slowly). "
+    "Preferred line for text-to-speech when non-empty. Disembodied director: second-person imperatives only "
+    "(e.g. Turn left thirty degrees, Hold steady, Pick up the cup, Look around). "
     "BANNED in this field: the words I, me, my, we, let's, please, could you; question marks; "
     "narration of what you will do (e.g. I will look around). "
-    "If nothing useful to command aloud this tick (waiting, no new directive), output empty string \"\"."
+    "You may leave this empty when actions still carry the directive—the server will announce each tool in order."
 )
 
 
@@ -96,6 +96,68 @@ def action_to_api_dict(action: Action) -> dict[str, Any]:
     return {"name": action.name, "args": action_args_dict(action)}
 
 
+def _tts_phrase_for_action(action: Action) -> str:
+    """Short imperative for TTS when the model omits instruction (one phrase per tool)."""
+    args = action_args_dict(action)
+    n = action.name
+
+    def _int_key(k: str, default: int = 1) -> int:
+        v = args.get(k)
+        if isinstance(v, bool) or v is None:
+            return default
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return default
+
+    if n == "move_forward":
+        steps = max(1, _int_key("steps", 1))
+        return "Step forward." if steps == 1 else f"Take {steps} steps forward."
+    if n == "move_backward":
+        steps = max(1, _int_key("steps", 1))
+        return "Step backward." if steps == 1 else f"Take {steps} steps backward."
+    if n == "turn_left":
+        deg = _int_key("degrees", 30)
+        return f"Turn left {deg} degrees."
+    if n == "turn_right":
+        deg = _int_key("degrees", 30)
+        return f"Turn right {deg} degrees."
+    if n == "pick_up":
+        t = args.get("target")
+        if isinstance(t, str) and t.strip():
+            return f"Pick up the {t.strip()}."
+        return "Pick up the object."
+    if n == "drop":
+        return "Put it down."
+    if n == "place":
+        tgt = args.get("target")
+        near = args.get("near")
+        ts = tgt.strip() if isinstance(tgt, str) and tgt.strip() else "it"
+        if isinstance(near, str) and near.strip():
+            return f"Place the {ts} near the {near.strip()}."
+        return f"Place the {ts}."
+    if n == "look_around":
+        return "Look around."
+    if n == "wait":
+        sec = args.get("seconds")
+        if isinstance(sec, (int, float)) and sec > 0:
+            return "Hold steady."
+        return "Hold steady."
+    return ""
+
+
+def tts_line_from_actions(actions: list[Action]) -> str:
+    """
+    Build a single TTS string from the action list (in order).
+    Used when instruction is empty so every tool call is still vocalized.
+    """
+    if not actions:
+        return ""
+    parts = [_tts_phrase_for_action(a) for a in actions]
+    parts = [p for p in parts if p]
+    return ". ".join(parts).strip()
+
+
 MOTION_ACTION_NAMES: frozenset[str] = frozenset(
     {"move_forward", "move_backward", "turn_left", "turn_right"}
 )
@@ -127,6 +189,6 @@ task_anchor field:
 
 JSON fields:
 - thought: dashboard / operator only (not TTS).
-- instruction: spoken line only when non-empty; empty when waiting with nothing new to say aloud.
+- instruction: preferred spoken line; if empty, the server still speaks a short line derived from each action in order.
 """
 

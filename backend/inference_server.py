@@ -25,7 +25,8 @@ from PIL import Image
 
 from agent_attention import prioritize_grounded_for_model
 from agent_gemini import format_action_label, run_agent
-from agent_tools import action_to_api_dict
+from agent_tools import action_to_api_dict, tts_line_from_actions
+from executors import VISION, shutdown_pools
 from perception_postprocess import postprocess_frame_for_agent
 from vision_pipeline import VisionPipeline, pick_device
 from voice_gate import compute_voice_gate
@@ -218,7 +219,8 @@ async def agent_step(
         raise HTTPException(status_code=502, detail=f"Gemini error: {e}") from e
 
     labels = [format_action_label(a) for a in result.actions]
-    tts_line = (result.instruction or "").strip()
+    model_instruction = (result.instruction or "").strip()
+    tts_line = model_instruction or tts_line_from_actions(result.actions)
     dashboard_say = (result.thought or "").strip() or tts_line
     stored_anchor, inferred_held_out = await update_memory_after_agent_success(
         sid,
@@ -244,6 +246,7 @@ async def agent_step(
     return {
         "say": dashboard_say,
         "instruction": result.instruction or "",
+        "spoken_line": tts_line,
         "actions": [action_to_api_dict(a) for a in result.actions],
         "state_version": snap.version,
         "task_anchor": stored_anchor,
@@ -267,7 +270,7 @@ async def ws_infer(ws: WebSocket) -> None:
         while True:
             data = await ws.receive_bytes()
             try:
-                frame = await loop.run_in_executor(None, decode_image_bytes, data)
+                frame = await loop.run_in_executor(VISION, decode_image_bytes, data)
             except Exception as e:
                 if not await _send_json_safe(
                     ws,
@@ -279,7 +282,7 @@ async def ws_infer(ws: WebSocket) -> None:
             async with _infer_lock:
                 try:
                     pipeline = get_pipeline_for_preset(model_preset)
-                    out = await loop.run_in_executor(None, pipeline.infer, frame)
+                    out = await loop.run_in_executor(VISION, pipeline.infer, frame)
                 except Exception as e:
                     if not await _send_json_safe(
                         ws,
@@ -294,7 +297,7 @@ async def ws_infer(ws: WebSocket) -> None:
             # Publish LATEST_STATE before notifying the client so POST /v1/agent/step
             # never races a 409 (client used to infer JSON before publish_latest finished).
             try:
-                webp_bytes, grounded = await loop.run_in_executor(None, _cpu)
+                webp_bytes, grounded = await loop.run_in_executor(VISION, _cpu)
                 await publish_latest(sid, webp_bytes, out, grounded)
             except Exception:
                 pass
@@ -308,4 +311,9 @@ async def ws_infer(ws: WebSocket) -> None:
 @app.on_event("startup")
 async def startup() -> None:
     lp = asyncio.get_event_loop()
-    await lp.run_in_executor(None, get_pipeline_for_preset, "oiv7")
+    await lp.run_in_executor(VISION, get_pipeline_for_preset, "oiv7")
+
+
+@app.on_event("shutdown")
+def shutdown() -> None:
+    shutdown_pools()

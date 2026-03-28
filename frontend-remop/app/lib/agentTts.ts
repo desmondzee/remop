@@ -16,6 +16,17 @@ export type TtsEngine = "browser" | "kokoro";
 
 const CANCEL_DEFER_MS = 50;
 
+/** Console: `[remop:tts]` — on in development; set NEXT_PUBLIC_TTS_DEBUG=0 to mute, =1 to force in prod. */
+const TTS_DEBUG =
+  process.env.NEXT_PUBLIC_TTS_DEBUG !== "0" &&
+  (process.env.NEXT_PUBLIC_TTS_DEBUG === "1" ||
+    process.env.NODE_ENV === "development");
+
+function ttsLog(...args: unknown[]) {
+  if (!TTS_DEBUG) return;
+  console.log("[remop:tts]", ...args);
+}
+
 const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 
 function envEngine(): TtsEngine {
@@ -245,6 +256,7 @@ async function ensureKokoro(): Promise<LoadedKokoro> {
   emitKokoroStatus();
 
   kokoroLoadPromise = (async () => {
+    ttsLog("ensureKokoro: stream polyfills + dynamic import");
     await ensureKokoroStreamPolyfills();
     const unmaskNode = maskProcessNodeVersionForBrowserImport();
     let KokoroTTS: typeof import("./kokoro/kokoroTts").KokoroTTS;
@@ -266,6 +278,7 @@ async function ensureKokoro(): Promise<LoadedKokoro> {
         device = "wasm";
       }
     }
+    ttsLog("ensureKokoro: from_pretrained", KOKORO_MODEL_ID, device);
     const model = await KokoroTTS.from_pretrained(KOKORO_MODEL_ID, {
       dtype: "q8",
       device,
@@ -277,12 +290,14 @@ async function ensureKokoro(): Promise<LoadedKokoro> {
     kokoroStatus = "ready";
     kokoroStatusDetail = device === "webgpu" ? "WebGPU" : "WASM";
     emitKokoroStatus();
+    ttsLog("ensureKokoro: ready", device);
     return model;
   })().catch((e) => {
     kokoroLoadPromise = null;
     kokoroStatus = "error";
     kokoroStatusDetail = e instanceof Error ? e.message : String(e);
     emitKokoroStatus();
+    ttsLog("ensureKokoro: error", e);
     throw e;
   });
 
@@ -297,7 +312,10 @@ async function ensureKokoro(): Promise<LoadedKokoro> {
 async function playRawAudioToContext(
   raw: { audio: Float32Array; sampling_rate: number }
 ): Promise<void> {
-  if (typeof window === "undefined") return;
+  if (typeof window === "undefined") {
+    ttsLog("playRaw: skip (no window)");
+    return;
+  }
 
   let ctx = audioContext;
   if (!ctx) {
@@ -305,27 +323,38 @@ async function playRawAudioToContext(
       window.AudioContext ||
       (window as unknown as { webkitAudioContext?: typeof AudioContext })
         .webkitAudioContext;
-    if (!Ctx) return;
+    if (!Ctx) {
+      ttsLog("playRaw: no AudioContext constructor");
+      return;
+    }
     ctx = new Ctx();
     audioContext = ctx;
+    ttsLog("playRaw: created AudioContext", "sampleRate", ctx.sampleRate);
   }
 
   const n = raw.audio?.length ?? 0;
   const rate = raw.sampling_rate;
-  if (n === 0 || !Number.isFinite(rate) || rate <= 0) return;
+  if (n === 0 || !Number.isFinite(rate) || rate <= 0) {
+    ttsLog("playRaw: skip empty or bad rate", { n, rate, rawKeys: raw && Object.keys(raw) });
+    return;
+  }
 
+  let resumed = ctx.state;
   try {
     await ctx.resume();
-  } catch {
-    /* still attempt start — some engines succeed */
+    resumed = ctx.state;
+  } catch (e) {
+    ttsLog("playRaw: resume() rejected", e, "state", ctx.state);
   }
+  ttsLog("playRaw: context state after resume", resumed, "samples", n, "rate", rate);
 
   const samples = new Float32Array(raw.audio);
 
   let buffer: AudioBuffer;
   try {
     buffer = ctx.createBuffer(1, n, rate);
-  } catch {
+  } catch (e) {
+    ttsLog("playRaw: createBuffer failed", e);
     return;
   }
   buffer.getChannelData(0).set(samples);
@@ -341,11 +370,14 @@ async function playRawAudioToContext(
   return new Promise((resolve) => {
     src.onended = () => {
       if (kokoroCurrentSource === src) kokoroCurrentSource = null;
+      ttsLog("playRaw: onended");
       resolve();
     };
     try {
       src.start();
-    } catch {
+      ttsLog("playRaw: source.start() ok");
+    } catch (e) {
+      ttsLog("playRaw: source.start() threw", e);
       if (kokoroCurrentSource === src) kokoroCurrentSource = null;
       resolve();
     }
@@ -359,15 +391,31 @@ async function drainKokoroQueue(): Promise<void> {
     let model: LoadedKokoro;
     try {
       model = await ensureKokoro();
-    } catch {
+    } catch (e) {
+      ttsLog("drain: ensureKokoro failed", e);
       kokoroQueue.length = 0;
       emitPlaying(false);
       return;
     }
     if (myGen !== kokoroGen) continue;
 
-    const raw = await model.generate(line, { voice: kokoroVoice, speed: 1.05 });
+    // Let the browser run pending work (WebSocket send, rAF) before ONNX blocks the main thread.
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+
+    ttsLog("drain: generate start", { len: line.length, voice: kokoroVoice });
+    let raw: Awaited<ReturnType<LoadedKokoro["generate"]>>;
+    try {
+      raw = await model.generate(line, { voice: kokoroVoice, speed: 1.05 });
+    } catch (e) {
+      ttsLog("drain: generate failed", e);
+      kokoroQueue.shift();
+      continue;
+    }
     if (myGen !== kokoroGen) continue;
+
+    const alen = raw?.audio?.length ?? 0;
+    const sr = raw?.sampling_rate;
+    ttsLog("drain: generate done", { samples: alen, sampling_rate: sr });
 
     kokoroQueue.shift();
     emitPlaying(true);
@@ -378,13 +426,15 @@ async function drainKokoroQueue(): Promise<void> {
 }
 
 function scheduleKokoroDrain() {
-  kokoroSerial = kokoroSerial.then(() => drainKokoroQueue()).catch(() => {
+  kokoroSerial = kokoroSerial.then(() => drainKokoroQueue()).catch((e) => {
+    ttsLog("drain: unhandled rejection", e);
     kokoroQueue.length = 0;
     emitPlaying(false);
   });
 }
 
 function kokoroSpeakInstruction(text: string, supersede: boolean) {
+  ttsLog("kokoroSpeakInstruction", { supersede, len: text.length, hasCtx: !!audioContext });
   if (supersede) {
     kokoroGen++;
     try {
@@ -432,9 +482,14 @@ export function unlockAudioFromUserGesture(): void {
       audioContext = new Ctx();
     }
   }
-  void audioContext?.resume().catch(() => {
-    /* autoplay policy may reject until playback path calls resume again */
-  });
+  void audioContext
+    ?.resume()
+    .then(() => {
+      ttsLog("unlock: resume resolved", "state", audioContext?.state);
+    })
+    .catch((e) => {
+      ttsLog("unlock: resume rejected", e, "state", audioContext?.state);
+    });
 }
 
 /** Warm Kokoro weights after unlock (e.g. right after camera starts). */

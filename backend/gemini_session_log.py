@@ -1,4 +1,4 @@
-"""Append Gemini request/response records to a per-session JSON file under backend/logs/."""
+"""Append Gemini request/response records as JSON Lines (one object per line) under backend/logs/."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def _get_session_lock(sid_key: str) -> threading.Lock:
 
 
 def append_gemini_log(session_id: str, entry: dict[str, Any]) -> None:
-    """Thread-safe: one JSON file per logical session (first call picks timestamp in filename)."""
+    """Thread-safe append; O(1) per entry (no full-file rewrite)."""
     sid_key = (session_id or "").strip() or "default"
     safe = _safe_session_id(sid_key)
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -37,15 +37,8 @@ def append_gemini_log(session_id: str, entry: dict[str, Any]) -> None:
     with lock:
         if sid_key not in _paths:
             ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            _paths[sid_key] = _LOG_DIR / f"gemini_{safe}_{ts}.json"
-            doc: dict[str, Any] = {
-                "session_id": sid_key,
-                "log_started_utc": datetime.now(timezone.utc).isoformat(),
-                "entries": [entry],
-            }
-        else:
-            path = _paths[sid_key]
-            doc = json.loads(path.read_text(encoding="utf-8"))
-            doc["entries"].append(entry)
+            _paths[sid_key] = _LOG_DIR / f"gemini_{safe}_{ts}.jsonl"
         path = _paths[sid_key]
-        path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        line = json.dumps(entry, ensure_ascii=False, default=str)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
