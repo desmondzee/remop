@@ -25,7 +25,7 @@ from PIL import Image
 
 from agent_attention import prioritize_grounded_for_model
 from agent_gemini import format_action_label, run_agent
-from agent_tools import action_to_api_dict, tts_line_from_actions
+from agent_tools import action_to_api_dict
 from executors import VISION, shutdown_pools
 from perception_postprocess import postprocess_frame_for_agent
 from vision_pipeline import VisionPipeline, pick_device
@@ -220,8 +220,8 @@ async def agent_step(
 
     labels = [format_action_label(a) for a in result.actions]
     model_instruction = (result.instruction or "").strip()
-    tts_line = model_instruction or tts_line_from_actions(result.actions)
-    dashboard_say = (result.thought or "").strip() or tts_line
+    tts_line = model_instruction
+    dashboard_say = (result.thought or "").strip() or model_instruction
     stored_anchor, inferred_held_out = await update_memory_after_agent_success(
         sid,
         thought=(result.thought or "").strip(),

@@ -207,29 +207,73 @@ async def get_memory_for_prompt(session_id: str) -> dict[str, Any]:
 def _format_turn_log_excerpt(turns: list[dict[str, Any]], max_chars: int) -> str:
     if not turns or max_chars <= 0:
         return ""
-    lines: list[str] = []
-    for t in turns:
+
+    def _serialize_turn(t: dict[str, Any]) -> str:
         thought = str(t.get("thought", "") or t.get("say", "")).strip()
         instruction = str(t.get("instruction", "")).strip()
         acts = t.get("actions")
         if not isinstance(acts, list):
             acts = []
         anch = str(t.get("anchor", "")).strip()
-        lines.append(
-            json.dumps(
+        return json.dumps(
+            {
+                "thought": thought,
+                "instruction": instruction,
+                "actions": acts,
+                "anchor_after": anch,
+            },
+            separators=(",", ":"),
+        )
+
+    lines = [_serialize_turn(t) for t in turns]
+    blob = "\n".join(lines)
+    if len(blob) <= max_chars:
+        return blob
+
+    chosen_rev: list[str] = []
+    total = 0
+    for s in reversed(lines):
+        add_len = len(s) + (1 if chosen_rev else 0)
+        if total + add_len > max_chars:
+            break
+        chosen_rev.append(s)
+        total += add_len
+    if chosen_rev:
+        return "\n".join(reversed(chosen_rev))
+
+    last_turn = turns[-1]
+    thought = str(last_turn.get("thought", "") or last_turn.get("say", "")).strip()
+    instruction = str(last_turn.get("instruction", "") or "").strip()
+    acts = last_turn.get("actions")
+    if not isinstance(acts, list):
+        acts = []
+    anch = str(last_turn.get("anchor", "")).strip()
+    while True:
+        line = json.dumps(
+            {
+                "thought": thought,
+                "instruction": instruction,
+                "actions": acts,
+                "anchor_after": anch,
+            },
+            separators=(",", ":"),
+        )
+        if len(line) <= max_chars:
+            return line
+        if len(thought) > 48:
+            thought = thought[: len(thought) - 120].rstrip() + "…"
+        elif len(instruction) > 24:
+            instruction = instruction[: len(instruction) - 60].rstrip() + "…"
+        else:
+            return json.dumps(
                 {
-                    "thought": thought,
-                    "instruction": instruction,
+                    "thought": "…",
+                    "instruction": instruction[:80],
                     "actions": acts,
                     "anchor_after": anch,
                 },
                 separators=(",", ":"),
-            )
-        )
-    blob = "\n".join(lines)
-    if len(blob) <= max_chars:
-        return blob
-    return blob[-max_chars:]
+            )[:max_chars]
 
 
 async def update_memory_after_agent_success(

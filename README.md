@@ -311,7 +311,7 @@ Success JSON ([`inference_server.py`](backend/inference_server.py)):
 |-----|---------|
 | `say` | Dashboard line: **`thought`** if non-empty else **spoken_line** fallback. |
 | `instruction` | Raw model **`instruction`**. |
-| `spoken_line` | **`instruction`** if set, else **`tts_line_from_actions`**. |
+| `spoken_line` | Trimmed model **`instruction`** only (empty string means no speech this tick). |
 | `actions` | `[{ "name", "args" }]` via **`action_to_api_dict`** (parsed `args_json`). |
 | `state_version` | **`snap.version`** at time of read (perception snapshot used). |
 | `task_anchor` | Stored anchor after merge. |

@@ -65,10 +65,12 @@ PHYSICAL_EVIDENCE_AND_HOLDING = """
 ## Physical evidence, thought, instruction, and tools
 - Tools are requests to the human, not facts. Do not use past tense in thought for pick_up, place, drop, or motion unless the current image and grounding support completion (e.g. object gone from floor, clear interaction, or last outcome / human feedback says so).
 - Right after pick_up in actions, keep issuing pick_up in subsequent ticks until the image or feedback shows progress; use wait only when the scene is genuinely settling (see intent persistence below).
-- Choose placement yourself: use place with target and near drawn from visible grounded classes. Do not ask the human an open-ended "where should I put it?" in thought unless last outcome explicitly requires it.
+- Choose placement yourself: use place only when both the held target and a valid "near" class appear in the current grounded list. Do not ask the human an open-ended "where should I put it?" in thought unless last outcome explicitly requires it.
+- Multiple detections of the same class still on the floor or a surface do not prove the human is holding one—visible bottles are not proof of an item in hand. Tie "holding" to session inferred-held text and the image, not task_anchor alone.
 - If the user message includes an inferred held target matching a detection class, assume that detection may be the object in hand in first-person view. Do NOT issue pick_up again for that same held class; proceed toward place using other visible classes as near targets.
 - If last outcome / human feedback contradicts what you see (e.g. they dropped the item), align thought and actions; use CLEAR or a new anchor if needed.
-- Intent persistence: If you issue a physical command (move_forward, move_backward, turn_left, turn_right, pick_up, place, drop, look_around), you MUST keep the same primary motor intent in actions on subsequent ticks until the image or last_outcome shows completion or clear failure. Do not drop that command for wait or look_around alone on the very next tick while the human may still be executing it—otherwise downstream speech may never reflect the skipped step. Re-issue the same tool until evidence; use wait when motion is still in progress per cooldown hints.
+- Do not repeat the same place when the chosen "near" class is absent from the current grounded list; re-acquire the scene with look_around or move_forward (using cz) first.
+- Intent persistence: If you issue a physical command (move_forward, move_backward, turn_left, turn_right, pick_up, place, drop, look_around), you MUST keep the same primary motor intent in actions on subsequent ticks until the image or last_outcome shows completion or clear failure. Do not drop that command for wait or look_around alone on the very next tick while the human may still be executing it. Re-issue the same tool until evidence; use wait when motion is still in progress per cooldown hints. When persisting, leave instruction empty to avoid repeated speech (Silence is Golden).
 """
 
 PERCEPTION_AND_SCHEMA_BLOCK = f"""You see one still frame (WebP) plus a JSON list of grounded objects. Fields use normalized image coordinates cx, cy in [0,1].
@@ -78,7 +80,7 @@ cz is a rough step-equivalent forward distance from monocular depth (calibrated 
 
 Output valid JSON only matching the schema: thought, instruction, actions, and task_anchor.
 - thought: operator dashboard only (status, reasoning, conversational allowed). Not read aloud.
-- instruction: preferred TTS line; second-person imperatives; follow schema (banned words, no questions). If empty, the server still announces each action (e.g. look_around → Look around).
+- instruction: the ONLY spoken line for this tick; second-person imperatives; follow schema (banned words, no questions). Empty "" means complete silence—use that during wait or when repeating the same ongoing motion.
 - task_anchor: do not output punctuation-only or whitespace-only anchors; use "" to keep, CLEAR to clear, or a short object class name.
 Be concise. Prefer one clear next step. Safety first."""
 
@@ -198,7 +200,8 @@ def _user_text(
         )
     parts.append(
         "Respond with JSON: one physical next step for the human and the matching actions. "
-        "Use thought for operator-facing status; use instruction for a short imperative spoken line when you want specific wording—otherwise leave instruction empty and the server will still announce each tool in actions aloud."
+        "Use thought for operator-facing status; use instruction only when the human should hear speech this tick—"
+        "otherwise leave instruction empty \"\" for silence (no server-derived speech from actions)."
     )
     return "\n".join(parts)
 

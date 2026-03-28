@@ -29,7 +29,7 @@ class Action(BaseModel):
     name: ActionName
     args_json: str = Field(
         default="{}",
-        description='Parameters as one JSON object encoded in a string only, e.g. {} or {"degrees":30} or {"target":"cup"}. No markdown, no trailing commentary.',
+        description='Parameters as one JSON object encoded in a string only, e.g. {} or {"degrees":30} or {"target":"cup","sector":"left"}. No markdown, no trailing commentary.',
     )
 
 
@@ -46,11 +46,12 @@ _THOUGHT_DESC = (
 )
 
 _INSTRUCTION_DESC = (
-    "Preferred line for text-to-speech when non-empty. Disembodied director: second-person imperatives only "
-    "(e.g. Turn left thirty degrees, Hold steady, Pick up the cup, Look around). "
+    "The ONLY spoken line to the human for this tick. Disembodied director: second-person imperatives only "
+    "(e.g. Turn left thirty degrees, Hold steady, Pick up the cup on the left, Look around). "
     "BANNED in this field: the words I, me, my, we, let's, please, could you; question marks; "
     "narration of what you will do (e.g. I will look around). "
-    "You may leave this empty when actions still carry the directive—the server will announce each tool in order."
+    "If you output an empty string \"\", the human hears nothing this tick—leave empty during wait or when "
+    "repeating an ongoing motion so the assistant does not babble."
 )
 
 
@@ -124,8 +125,12 @@ def _tts_phrase_for_action(action: Action) -> str:
         return f"Turn right {deg} degrees."
     if n == "pick_up":
         t = args.get("target")
+        sec = args.get("sector")
         if isinstance(t, str) and t.strip():
-            return f"Pick up the {t.strip()}."
+            ts = t.strip()
+            if isinstance(sec, str) and sec.strip():
+                return f"Pick up the {ts} on the {sec.strip()}."
+            return f"Pick up the {ts}."
         return "Pick up the object."
     if n == "drop":
         return "Put it down."
@@ -149,7 +154,7 @@ def _tts_phrase_for_action(action: Action) -> str:
 def tts_line_from_actions(actions: list[Action]) -> str:
     """
     Build a single TTS string from the action list (in order).
-    Used when instruction is empty so every tool call is still vocalized.
+    Optional helper for tests or tooling; the live agent path uses model instruction only (Silence is Golden).
     """
     if not actions:
         return ""
@@ -166,14 +171,14 @@ MOTION_ACTION_NAMES: frozenset[str] = frozenset(
 ACTION_REGISTRY_PROMPT = """
 Each action uses args_json: a single string containing a JSON object (not arbitrary keys in the schema).
 Examples:
-- move_forward: args_json "{\\"steps\\":1}"
+- move_forward: args_json "{\\"steps\\":1}" — walk forward. Use to approach a target when its grounded "cz" is too small (object too far to interact); prefer look_around or turns to scan before walking if the scene is unknown.
 - move_backward: args_json "{\\"steps\\":1}"
 - turn_left: args_json "{\\"degrees\\":30}"
 - turn_right: args_json "{\\"degrees\\":30}"
-- pick_up: args_json "{\\"target\\":\\"cup\\"}" — request the human to grasp; target MUST match a visible grounded "class" string. This is a request, not confirmation that the object is already in hand.
+- pick_up: args_json "{\\"target\\":\\"cup\\",\\"sector\\":\\"left\\"}" — request the human to grasp. "target" MUST match a visible grounded "class" string. If multiple objects share the same class, you MUST include "sector" (left/center/right) copied from the grounded object you mean. This is a request, not confirmation the object is in hand. "sector" does not change the session held-object class (still the same target class).
 - drop: args_json "{}" — release whatever is held; clears inferred holding state.
-- place: args_json "{\\"target\\":\\"shoe\\",\\"near\\":\\"table\\"}" — put the currently held object near a surface or container. "near" MUST be an exact class string from the current grounded list (e.g. table, bin, shelf), not vague words like "away" or "somewhere".
-- look_around: args_json "{}"
+- place: args_json "{\\"target\\":\\"shoe\\",\\"near\\":\\"table\\"}" — put the currently held object near a surface or container. "near" MUST be an exact class string from the current grounded list (e.g. table, bin, shelf), not vague words like "away" or "somewhere". If "near" is NOT in the current grounded list, you CANNOT use place—use look_around or move_forward (per cz) until a valid surface/container appears in the list. Do not repeat the same place when "near" is missing or invalid.
+- look_around: args_json "{}" — rotate in place to scan the room. Do not use this for locomotion.
 - wait: args_json "{}" or "{\\"seconds\\":2}"
 Use "{}" when there are no parameters.
 
@@ -189,6 +194,6 @@ task_anchor field:
 
 JSON fields:
 - thought: dashboard / operator only (not TTS).
-- instruction: preferred spoken line; if empty, the server still speaks a short line derived from each action in order.
+- instruction: the ONLY line spoken to the human this tick. If empty "", there is no speech—leave empty during wait or when repeating an ongoing motion. When pick_up includes "sector", your instruction must match (e.g. Pick up the bottle on the left).
 """
 

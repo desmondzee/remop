@@ -111,7 +111,6 @@ def compute_voice_gate(
     phase = _derive_phase(anchor_after, fp, actions)
 
     raw_line = (tts_line or "").strip()
-    echo = (voice_last_speak_text or "").strip() or raw_line
 
     commit_reason: CommitReason | None = None
     supersede = False
@@ -170,9 +169,8 @@ def compute_voice_gate(
     elif not should_speak:
         commit_reason = None
 
-    speak_out = raw_line if raw_line else echo
-    if not should_speak:
-        speak_out = echo if echo else raw_line
+    # Silence is golden: only emit speak text when the gate commits to speaking.
+    speak_out = raw_line if should_speak else ""
 
     payload = VoicePayload(
         speak=speak_out,
