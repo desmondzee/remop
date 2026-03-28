@@ -5,6 +5,41 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const DEFAULT_WS =
   process.env.NEXT_PUBLIC_INFERENCE_WS_URL ?? "ws://127.0.0.1:8000/ws/infer";
 
+function inferHttpBaseFromWs(wsUrl: string): string {
+  try {
+    const u = new URL(wsUrl);
+    u.protocol = u.protocol === "wss:" ? "https:" : "http:";
+    u.pathname = "";
+    u.search = "";
+    u.hash = "";
+    return u.toString().replace(/\/$/, "");
+  } catch {
+    return "http://127.0.0.1:8000";
+  }
+}
+
+type AgentAction = { name: string; args: Record<string, unknown> };
+
+type AgentStepOk = {
+  say: string;
+  actions: AgentAction[];
+  state_version?: number;
+};
+
+function parseFastApiDetail(detail: unknown): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((x) =>
+        typeof x === "object" && x !== null && "msg" in x
+          ? String((x as { msg: string }).msg)
+          : JSON.stringify(x)
+      )
+      .join("; ");
+  }
+  return JSON.stringify(detail);
+}
+
 const FMT_JPEG = 1;
 const FMT_WEBP = 2;
 const WEBP_QUALITY = 0.5;
@@ -85,6 +120,14 @@ export default function CameraOverlay() {
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [devicesLoaded, setDevicesLoaded] = useState(false);
   const [detectorPreset, setDetectorPreset] = useState<DetectorPreset>("oiv7");
+  const [sessionId] = useState(() =>
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `sid-${Date.now()}`
+  );
+  const [agentSay, setAgentSay] = useState("");
+  const [agentActions, setAgentActions] = useState<AgentAction[]>([]);
+  const [agentNote, setAgentNote] = useState("");
 
   const clearReconnect = () => {
     if (reconnectTimerRef.current) {
@@ -128,6 +171,7 @@ export default function CameraOverlay() {
     try {
       const u = new URL(wsUrl);
       u.searchParams.set("model", detectorPreset);
+      u.searchParams.set("session_id", sessionId);
       urlToOpen = u.toString();
     } catch {
       /* keep wsUrl if not parseable */
@@ -173,7 +217,7 @@ export default function CameraOverlay() {
     } catch {
       setStatus("Invalid WebSocket URL");
     }
-  }, [wsUrl, detectorPreset, drawDetections]);
+  }, [wsUrl, detectorPreset, sessionId, drawDetections]);
 
   useEffect(() => {
     connectWsRef.current = connectWs;
@@ -223,6 +267,9 @@ export default function CameraOverlay() {
   const stopCamera = useCallback(() => {
     streamingRef.current = false;
     setStreaming(false);
+    setAgentSay("");
+    setAgentActions([]);
+    setAgentNote("");
     clearReconnect();
     busyRef.current = false;
     cancelAnimationFrame(rafRef.current);
@@ -348,6 +395,51 @@ export default function CameraOverlay() {
   }, [streaming, tick]);
 
   useEffect(() => {
+    if (!streaming) return;
+    const base = (
+      process.env.NEXT_PUBLIC_AGENT_HTTP_URL ?? inferHttpBaseFromWs(wsUrl)
+    ).replace(/\/$/, "");
+    const poll = async () => {
+      if (!streamingRef.current) return;
+      try {
+        const r = await fetch(
+          `${base}/v1/agent/step?session_id=${encodeURIComponent(sessionId)}`,
+          { method: "POST" }
+        );
+        const text = await r.text();
+        let body: unknown;
+        try {
+          body = JSON.parse(text) as unknown;
+        } catch {
+          body = null;
+        }
+        if (!r.ok) {
+          const detail =
+            body &&
+            typeof body === "object" &&
+            body !== null &&
+            "detail" in body
+              ? parseFastApiDetail((body as { detail: unknown }).detail)
+              : text.slice(0, 160);
+          setAgentNote(`${r.status}: ${detail}`);
+          return;
+        }
+        const ok = body as AgentStepOk;
+        if (ok && typeof ok.say === "string") {
+          setAgentSay(ok.say);
+          setAgentActions(Array.isArray(ok.actions) ? ok.actions : []);
+          setAgentNote("");
+        }
+      } catch (e) {
+        setAgentNote(e instanceof Error ? e.message : String(e));
+      }
+    };
+    const t = window.setInterval(poll, 700);
+    void poll();
+    return () => clearInterval(t);
+  }, [streaming, sessionId, wsUrl]);
+
+  useEffect(() => {
     const onVis = () => {
       if (document.visibilityState === "hidden") {
         busyRef.current = false;
@@ -393,6 +485,9 @@ export default function CameraOverlay() {
           Stop
         </button>
         <span className="text-sm text-zinc-600 dark:text-zinc-400">{status}</span>
+        <span className="font-mono text-xs text-zinc-500" title="Sent to /ws/infer and /v1/agent/step">
+          session {sessionId.slice(0, 8)}…
+        </span>
       </div>
       <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end">
         <label className="flex min-w-[180px] flex-col gap-1 text-sm text-zinc-600 dark:text-zinc-400">
@@ -453,6 +548,31 @@ export default function CameraOverlay() {
           <code className="font-mono">?model=coco</code> from the Detector control.
         </span>
       </label>
+      {(streaming && (agentSay || agentNote || agentActions.length > 0)) && (
+        <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-3 text-sm dark:border-zinc-700 dark:bg-zinc-900/80">
+          <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+            Agent (Gemini)
+          </p>
+          {agentNote ? (
+            <p className="mt-1 text-amber-700 dark:text-amber-400">{agentNote}</p>
+          ) : null}
+          {agentSay ? (
+            <p className="mt-1 font-medium text-zinc-900 dark:text-zinc-100">{agentSay}</p>
+          ) : null}
+          {agentActions.length > 0 ? (
+            <ul className="mt-2 list-inside list-disc font-mono text-xs text-zinc-600 dark:text-zinc-400">
+              {agentActions.map((a, i) => (
+                <li key={`${a.name}-${i}`}>
+                  {a.name}
+                  {a.args && Object.keys(a.args).length > 0
+                    ? ` ${JSON.stringify(a.args)}`
+                    : ""}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      )}
       <div className="relative inline-block max-w-full overflow-hidden rounded-lg border border-zinc-200 bg-black dark:border-zinc-700">
         <video
           ref={videoRef}

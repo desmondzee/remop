@@ -7,3 +7,5 @@ fastapi
 uvicorn[standard]
 PyTurboJPEG
 Pillow
+google-genai
+pydantic>=2

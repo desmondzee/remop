@@ -1,5 +1,6 @@
 """
 FastAPI WebSocket server: WebP or JPEG frames in, JSON detections + depth out.
+Per-session LATEST_STATE for agent (decoupled from Gemini latency).
 Run: uvicorn inference_server:app --host 0.0.0.0 --port 8000
 """
 
@@ -11,11 +12,21 @@ from io import BytesIO
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
+from agent_gemini import format_action_label, run_agent
+from perception_postprocess import postprocess_frame_for_agent
 from vision_pipeline import VisionPipeline, pick_device
+from world_state import (
+    append_recent_actions,
+    copy_snapshot,
+    finish_agent_work,
+    get_recent_actions,
+    publish_latest,
+    try_begin_agent_work,
+)
 
 try:
     from turbojpeg import TurboJPEG
@@ -27,7 +38,6 @@ except Exception:
 JPEG_SOI = b"\xff\xd8"
 WEBP_MARKER = b"WEBP"
 
-# Optional leading byte: 0x01 = JPEG, 0x02 = WebP (client may send for clarity)
 FMT_JPEG = 1
 FMT_WEBP = 2
 
@@ -36,7 +46,6 @@ def decode_image_bytes(data: bytes) -> np.ndarray:
     """Return BGR uint8 image."""
     if len(data) < 2:
         raise ValueError("empty image")
-    offset = 0
     if data[0] in (FMT_JPEG, FMT_WEBP):
         fmt = data[0]
         payload = data[1:]
@@ -77,6 +86,15 @@ def _parse_origins() -> list[str]:
     return [o.strip() for o in raw.split(",") if o.strip()]
 
 
+def _agent_min_interval_ms() -> float:
+    return max(0.0, float(os.environ.get("AGENT_MIN_INTERVAL_MS", "500")))
+
+
+def _session_id(raw: str | None) -> str:
+    s = (raw or "").strip()
+    return s if s else "default"
+
+
 app = FastAPI(title="remop inference")
 app.add_middleware(
     CORSMiddleware,
@@ -87,7 +105,6 @@ app.add_middleware(
 )
 
 _infer_lock = asyncio.Lock()
-# Preset -> weights path (lazy-loaded). Override with YOLO_MODEL_OIV7 / YOLO_MODEL_COCO.
 MODEL_PRESETS: dict[str, str] = {
     "oiv7": os.environ.get("YOLO_MODEL_OIV7")
     or os.environ.get("YOLO_MODEL", "yolov8n-oiv7.pt"),
@@ -122,32 +139,105 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.post("/v1/agent/step")
+async def agent_step(
+    session_id: str | None = Query(
+        None,
+        description="Same id as WebSocket ?session_id= (default: default)",
+    ),
+    goal: str | None = Query(None),
+    last_outcome: str | None = Query(None),
+) -> dict:
+    sid = _session_id(session_id)
+    snap = await copy_snapshot(sid)
+    if snap is None:
+        raise HTTPException(
+            status_code=409,
+            detail="No perception state for this session yet; send frames on /ws/infer first.",
+        )
+    allowed, reason = await try_begin_agent_work(sid, _agent_min_interval_ms())
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Agent rate limited or busy: {reason}",
+        )
+    if not os.environ.get("GEMINI_API_KEY", "").strip():
+        await finish_agent_work(sid, success=False)
+        raise HTTPException(
+            status_code=503,
+            detail="GEMINI_API_KEY is not configured on the server.",
+        )
+
+    recent = await get_recent_actions(sid)
+    try:
+        result = await run_agent(
+            snap.frame_webp,
+            snap.grounded,
+            recent_actions=recent,
+            goal=goal,
+            last_outcome=last_outcome,
+        )
+    except Exception as e:
+        await finish_agent_work(sid, success=False)
+        raise HTTPException(status_code=502, detail=f"Gemini error: {e}") from e
+
+    labels = [format_action_label(a) for a in result.actions]
+    await append_recent_actions(sid, labels)
+    await finish_agent_work(sid, success=True)
+    return {
+        "say": result.say,
+        "actions": [a.model_dump() for a in result.actions],
+        "state_version": snap.version,
+    }
+
+
 @app.websocket("/ws/infer")
 async def ws_infer(ws: WebSocket) -> None:
     await ws.accept()
     model_preset = _normalize_model_query(ws.query_params.get("model"))
+    sid = _session_id(ws.query_params.get("session_id"))
     loop = asyncio.get_event_loop()
     try:
         while True:
             data = await ws.receive_bytes()
+            try:
+                frame = await loop.run_in_executor(None, decode_image_bytes, data)
+            except Exception as e:
+                if not await _send_json_safe(
+                    ws,
+                    {"error": str(e), "w": 0, "h": 0, "detections": []},
+                ):
+                    return
+                continue
+
             async with _infer_lock:
                 try:
-                    frame = await loop.run_in_executor(None, decode_image_bytes, data)
                     pipeline = get_pipeline_for_preset(model_preset)
                     out = await loop.run_in_executor(None, pipeline.infer, frame)
-                    if not await _send_json_safe(ws, out):
-                        return
                 except Exception as e:
                     if not await _send_json_safe(
                         ws,
                         {"error": str(e), "w": 0, "h": 0, "detections": []},
                     ):
                         return
+                    continue
+
+            if not await _send_json_safe(ws, out):
+                return
+
+            def _cpu() -> tuple[bytes, list]:
+                return postprocess_frame_for_agent(frame, out)
+
+            try:
+                webp_bytes, grounded = await loop.run_in_executor(None, _cpu)
+                await publish_latest(sid, webp_bytes, out, grounded)
+            except Exception:
+                pass
     except WebSocketDisconnect:
         return
 
 
 @app.on_event("startup")
 async def startup() -> None:
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, get_pipeline_for_preset, "oiv7")
+    lp = asyncio.get_event_loop()
+    await lp.run_in_executor(None, get_pipeline_for_preset, "oiv7")
