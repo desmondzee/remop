@@ -211,15 +211,19 @@ async def agent_step(
             seconds_since_last_step=sec_since,
             last_issued_action_labels=last_issued,
             inferred_held_object=inferred_held,
+            session_id=sid,
         )
     except Exception as e:
         await finish_agent_work(sid, success=False)
         raise HTTPException(status_code=502, detail=f"Gemini error: {e}") from e
 
     labels = [format_action_label(a) for a in result.actions]
+    tts_line = (result.instruction or "").strip()
+    dashboard_say = (result.thought or "").strip() or tts_line
     stored_anchor, inferred_held_out = await update_memory_after_agent_success(
         sid,
-        say=result.say,
+        thought=(result.thought or "").strip(),
+        instruction=tts_line,
         action_labels=labels,
         task_anchor_model=result.task_anchor or "",
         actions=result.actions,
@@ -228,7 +232,7 @@ async def agent_step(
         anchor_before=effective_anchor,
         anchor_after=stored_anchor,
         actions=result.actions,
-        say=result.say,
+        tts_line=tts_line,
         voice_last_speak_text=vlst,
         voice_last_speak_monotonic=vlsm,
         voice_last_motor_fingerprint=vlmf,
@@ -238,7 +242,8 @@ async def agent_step(
     await finish_agent_work(sid, success=True)
     vp = voice_res.payload
     return {
-        "say": result.say,
+        "say": dashboard_say,
+        "instruction": result.instruction or "",
         "actions": [action_to_api_dict(a) for a in result.actions],
         "state_version": snap.version,
         "task_anchor": stored_anchor,

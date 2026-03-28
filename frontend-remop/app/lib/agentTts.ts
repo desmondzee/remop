@@ -1,9 +1,16 @@
 /**
  * Agent instruction TTS: Web Speech (default) or optional Kokoro (client-side).
+ * Kokoro follows hexgrad/kokoro.js: Transformers.js + ONNX + phonemizer (eSpeak), with stream
+ * polyfills in `kokoro/kokoroBrowserRuntime.ts` so WebKit can iterate gzip streams.
  * Keeps strong refs to SpeechSynthesisUtterance until onend/onerror (Chrome/Safari GC).
  * Defers speak() after cancel() to avoid engine race. Call unlockAudioFromUserGesture
  * from Start camera (same user gesture) for iOS/Safari.
  */
+
+import {
+  ensureKokoroStreamPolyfills,
+  maskProcessNodeVersionForBrowserImport,
+} from "./kokoro/kokoroBrowserRuntime";
 
 export type TtsEngine = "browser" | "kokoro";
 
@@ -40,7 +47,15 @@ const subscribers = new Set<(v: boolean) => void>();
 function emitPlaying(v: boolean) {
   if (isPlayingFlag === v) return;
   isPlayingFlag = v;
-  for (const cb of subscribers) cb(v);
+  subscribers.forEach((cb) => {
+    if (typeof cb === "function") {
+      try {
+        cb(v);
+      } catch {
+        /* ignore subscriber failures */
+      }
+    }
+  });
 }
 
 export function getIsTtsPlaying(): boolean {
@@ -56,8 +71,9 @@ export function subscribeTtsPlaying(cb: (v: boolean) => void): () => void {
 // --- Engine & Kokoro ---
 let engine: TtsEngine = envEngine();
 const kokoroVoice = envKokoroVoice();
-let kokoroModel: import("kokoro-js").KokoroTTS | null = null;
-let kokoroLoadPromise: Promise<import("kokoro-js").KokoroTTS> | null = null;
+type LoadedKokoro = import("./kokoro/kokoroTts").KokoroTTS;
+let kokoroModel: LoadedKokoro | null = null;
+let kokoroLoadPromise: Promise<LoadedKokoro> | null = null;
 let kokoroStatus: "idle" | "loading" | "ready" | "error" = "idle";
 let kokoroStatusDetail = "";
 const kokoroStatusSubscribers = new Set<
@@ -66,7 +82,15 @@ const kokoroStatusSubscribers = new Set<
 
 function emitKokoroStatus() {
   const payload = { status: kokoroStatus, detail: kokoroStatusDetail };
-  for (const cb of kokoroStatusSubscribers) cb(payload);
+  kokoroStatusSubscribers.forEach((cb) => {
+    if (typeof cb === "function") {
+      try {
+        cb(payload);
+      } catch {
+        /* ignore */
+      }
+    }
+  });
 }
 
 export function subscribeKokoroStatus(
@@ -93,6 +117,28 @@ export function getSharedAudioContext(): AudioContext | null {
   return audioContext;
 }
 
+/** Some environments expose speechSynthesis without speak() or the Utterance constructor. */
+function getBrowserSpeechApi(): {
+  synth: SpeechSynthesis;
+  Utterance: new (text: string) => SpeechSynthesisUtterance;
+} | null {
+  if (typeof window === "undefined") return null;
+  const w = window as Window & {
+    SpeechSynthesisUtterance?: new (text: string) => SpeechSynthesisUtterance;
+  };
+  const synth = w.speechSynthesis;
+  const Utterance = w.SpeechSynthesisUtterance;
+  if (
+    !synth ||
+    typeof synth.speak !== "function" ||
+    typeof synth.cancel !== "function" ||
+    typeof Utterance !== "function"
+  ) {
+    return null;
+  }
+  return { synth, Utterance };
+}
+
 // --- Browser queue ---
 const browserQueue: string[] = [];
 let browserSpeaking = false;
@@ -110,7 +156,14 @@ function browserPumpPlayingState() {
 }
 
 function speakNextBrowserUtterance() {
-  if (typeof window === "undefined" || !window.speechSynthesis) return;
+  const api = getBrowserSpeechApi();
+  if (!api) {
+    browserQueue.length = 0;
+    browserSpeaking = false;
+    clearBrowserDefer();
+    emitPlaying(false);
+    return;
+  }
   if (browserSpeaking || browserQueue.length === 0) {
     browserPumpPlayingState();
     return;
@@ -119,7 +172,7 @@ function speakNextBrowserUtterance() {
   browserSpeaking = true;
   browserPumpPlayingState();
 
-  const u = new SpeechSynthesisUtterance(text);
+  const u = new api.Utterance(text);
   u.lang = "en-US";
   u.rate = 1.05;
   u.pitch = 1;
@@ -142,7 +195,7 @@ function speakNextBrowserUtterance() {
   u.onend = () => finish();
   u.onerror = () => finish();
 
-  window.speechSynthesis.speak(u);
+  api.synth.speak(u);
 }
 
 function scheduleBrowserAfterCancel() {
@@ -155,11 +208,12 @@ function scheduleBrowserAfterCancel() {
 }
 
 function browserSpeakInstruction(text: string, supersede: boolean) {
-  if (typeof window === "undefined" || !window.speechSynthesis) return;
+  const api = getBrowserSpeechApi();
+  if (!api) return;
 
   if (supersede) {
     clearBrowserDefer();
-    window.speechSynthesis.cancel();
+    api.synth.cancel();
     clearActiveUtterances();
     browserSpeaking = false;
     browserQueue.length = 0;
@@ -182,7 +236,7 @@ let kokoroGen = 0;
 let kokoroSerial = Promise.resolve();
 let kokoroCurrentSource: AudioBufferSourceNode | null = null;
 
-async function ensureKokoro(): Promise<import("kokoro-js").KokoroTTS> {
+async function ensureKokoro(): Promise<LoadedKokoro> {
   if (kokoroModel) return kokoroModel;
   if (kokoroLoadPromise) return kokoroLoadPromise;
 
@@ -191,7 +245,14 @@ async function ensureKokoro(): Promise<import("kokoro-js").KokoroTTS> {
   emitKokoroStatus();
 
   kokoroLoadPromise = (async () => {
-    const { KokoroTTS } = await import("kokoro-js");
+    await ensureKokoroStreamPolyfills();
+    const unmaskNode = maskProcessNodeVersionForBrowserImport();
+    let KokoroTTS: typeof import("./kokoro/kokoroTts").KokoroTTS;
+    try {
+      ({ KokoroTTS } = await import("./kokoro/kokoroTts"));
+    } finally {
+      unmaskNode();
+    }
     let device: "webgpu" | "wasm" = "wasm";
     if (typeof navigator !== "undefined" && "gpu" in navigator) {
       try {
@@ -209,6 +270,9 @@ async function ensureKokoro(): Promise<import("kokoro-js").KokoroTTS> {
       dtype: "q8",
       device,
     });
+    if (typeof model?.generate !== "function") {
+      throw new TypeError("KokoroTTS model has no generate()");
+    }
     kokoroModel = model;
     kokoroStatus = "ready";
     kokoroStatusDetail = device === "webgpu" ? "WebGPU" : "WASM";
@@ -225,14 +289,46 @@ async function ensureKokoro(): Promise<import("kokoro-js").KokoroTTS> {
   return kokoroLoadPromise;
 }
 
-function playRawAudioToContext(
+/**
+ * Kokoro `generate()` finishes long after the click that unlocked audio; browsers often
+ * leave AudioContext "suspended" until resume() runs in the same "activation" as playback.
+ * Always await resume() here (and create the context if needed) so output is audible.
+ */
+async function playRawAudioToContext(
   raw: { audio: Float32Array; sampling_rate: number }
 ): Promise<void> {
-  const ctx = audioContext;
-  if (!ctx) return Promise.resolve();
+  if (typeof window === "undefined") return;
 
-  const buffer = ctx.createBuffer(1, raw.audio.length, raw.sampling_rate);
-  buffer.getChannelData(0).set(raw.audio);
+  let ctx = audioContext;
+  if (!ctx) {
+    const Ctx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (!Ctx) return;
+    ctx = new Ctx();
+    audioContext = ctx;
+  }
+
+  const n = raw.audio?.length ?? 0;
+  const rate = raw.sampling_rate;
+  if (n === 0 || !Number.isFinite(rate) || rate <= 0) return;
+
+  try {
+    await ctx.resume();
+  } catch {
+    /* still attempt start — some engines succeed */
+  }
+
+  const samples = new Float32Array(raw.audio);
+
+  let buffer: AudioBuffer;
+  try {
+    buffer = ctx.createBuffer(1, n, rate);
+  } catch {
+    return;
+  }
+  buffer.getChannelData(0).set(samples);
 
   const src = ctx.createBufferSource();
   src.buffer = buffer;
@@ -260,7 +356,7 @@ async function drainKokoroQueue(): Promise<void> {
   while (kokoroQueue.length > 0) {
     const myGen = kokoroGen;
     const line = kokoroQueue[0];
-    let model: import("kokoro-js").KokoroTTS;
+    let model: LoadedKokoro;
     try {
       model = await ensureKokoro();
     } catch {
@@ -270,13 +366,7 @@ async function drainKokoroQueue(): Promise<void> {
     }
     if (myGen !== kokoroGen) continue;
 
-    type GenOpts = { voice?: string; speed?: number };
-    const raw = await (
-      model.generate as (
-        text: string,
-        opts?: GenOpts
-      ) => Promise<{ audio: Float32Array; sampling_rate: number }>
-    )(line, { voice: kokoroVoice, speed: 1.05 });
+    const raw = await model.generate(line, { voice: kokoroVoice, speed: 1.05 });
     if (myGen !== kokoroGen) continue;
 
     kokoroQueue.shift();
@@ -318,25 +408,33 @@ export function unlockAudioFromUserGesture(): void {
   if (!unlockDone) {
     unlockDone = true;
     try {
-      const u = new SpeechSynthesisUtterance(" ");
-      u.volume = 0;
-      activeUtterances.push(u);
-      u.onend = u.onerror = () => {
-        removeUtterance(u);
-      };
-      window.speechSynthesis?.speak(u);
+      const api = getBrowserSpeechApi();
+      if (api) {
+        const u = new api.Utterance(" ");
+        u.volume = 0;
+        activeUtterances.push(u);
+        u.onend = u.onerror = () => {
+          removeUtterance(u);
+        };
+        api.synth.speak(u);
+      }
     } catch {
       /* ignore */
     }
   }
 
   if (!audioContext) {
-    const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    const Ctx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
     if (Ctx) {
       audioContext = new Ctx();
     }
   }
-  void audioContext?.resume();
+  void audioContext?.resume().catch(() => {
+    /* autoplay policy may reject until playback path calls resume again */
+  });
 }
 
 /** Warm Kokoro weights after unlock (e.g. right after camera starts). */
@@ -370,9 +468,10 @@ export function getTtsQueueDepth(): number {
 
 /** Stop camera / teardown: cancel speech and clear queues so flags do not stick. */
 export function resetAgentTts(): void {
-  if (typeof window !== "undefined" && window.speechSynthesis) {
+  const api = getBrowserSpeechApi();
+  if (api) {
     clearBrowserDefer();
-    window.speechSynthesis.cancel();
+    api.synth.cancel();
   }
   clearActiveUtterances();
   browserQueue.length = 0;

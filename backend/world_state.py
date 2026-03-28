@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -49,12 +50,23 @@ def _memory_max_chars() -> int:
     return max(0, min(20000, int(os.environ.get("AGENT_MEMORY_MAX_CHARS", "2000"))))
 
 
+def sanitize_task_anchor_text(model_out: str) -> str:
+    """
+    Keep alphanumerics and ASCII spaces; collapse whitespace.
+    Empty after sanitize means no usable anchor (caller treats as keep-current).
+    """
+    s = (model_out or "").strip()
+    s = re.sub(r"[^a-zA-Z0-9 ]+", " ", s)
+    s = " ".join(s.split())
+    return s.strip()
+
+
 def merge_task_anchor_from_model(current: str, model_out: str) -> str:
     """
     Tri-state task_anchor from the model:
     - "" or whitespace -> keep current
     - CLEAR (case-insensitive; outer quotes stripped) -> session anchor cleared
-    - else -> replace with truncated text
+    - else -> replace with sanitized truncated text; punctuation-only -> keep current
     """
     s = (model_out or "").strip()
     while len(s) >= 2 and s[0] in "\"'" and s[-1] == s[0]:
@@ -63,8 +75,11 @@ def merge_task_anchor_from_model(current: str, model_out: str) -> str:
         return current
     if s.upper() == "CLEAR":
         return ""
+    sanitized = sanitize_task_anchor_text(s)
+    if not sanitized:
+        return current
     cap = _task_anchor_max_len()
-    return s[:cap] if cap else s
+    return sanitized[:cap] if cap else sanitized
 
 
 @dataclass
@@ -194,14 +209,20 @@ def _format_turn_log_excerpt(turns: list[dict[str, Any]], max_chars: int) -> str
         return ""
     lines: list[str] = []
     for t in turns:
-        say = str(t.get("say", "")).strip()
+        thought = str(t.get("thought", "") or t.get("say", "")).strip()
+        instruction = str(t.get("instruction", "")).strip()
         acts = t.get("actions")
         if not isinstance(acts, list):
             acts = []
         anch = str(t.get("anchor", "")).strip()
         lines.append(
             json.dumps(
-                {"say": say, "actions": acts, "anchor_after": anch},
+                {
+                    "thought": thought,
+                    "instruction": instruction,
+                    "actions": acts,
+                    "anchor_after": anch,
+                },
                 separators=(",", ":"),
             )
         )
@@ -214,7 +235,8 @@ def _format_turn_log_excerpt(turns: list[dict[str, Any]], max_chars: int) -> str
 async def update_memory_after_agent_success(
     session_id: str,
     *,
-    say: str,
+    thought: str,
+    instruction: str,
     action_labels: list[str],
     task_anchor_model: str,
     actions: list[Action] | None = None,
@@ -233,7 +255,8 @@ async def update_memory_after_agent_success(
             )
         st.turn_log.append(
             {
-                "say": say,
+                "thought": thought,
+                "instruction": instruction,
                 "actions": list(action_labels),
                 "anchor": st.task_anchor,
             }

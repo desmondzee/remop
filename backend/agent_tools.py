@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 ActionName = Literal[
     "move_forward",
@@ -40,17 +40,46 @@ _TASK_ANCHOR_DESC = (
     '(e.g. "cup"), not synonyms like "drink".'
 )
 
+_THOUGHT_DESC = (
+    "Operator dashboard line: status, reasoning, or wait-state copy. NOT read aloud. "
+    "Conversational tone allowed. Do not duplicate the instruction field here unless you have extra context."
+)
+
+_INSTRUCTION_DESC = (
+    "Exact line for text-to-speech only when non-empty. Disembodied director: second-person imperatives only "
+    "(e.g. Turn left thirty degrees, Hold steady, Pick up the cup, Pan the camera slowly). "
+    "BANNED in this field: the words I, me, my, we, let's, please, could you; question marks; "
+    "narration of what you will do (e.g. I will look around). "
+    "If nothing useful to command aloud this tick (waiting, no new directive), output empty string \"\"."
+)
+
 
 class AgentResponse(BaseModel):
-    say: str = Field(
-        description="One short sentence for the human, suitable for text-to-speech; no tool names or JSON."
-    )
+    thought: str = Field(default="", description=_THOUGHT_DESC)
+    instruction: str = Field(default="", description=_INSTRUCTION_DESC)
     actions: list[Action] = Field(default_factory=list)
     task_anchor: str = Field(
         default="",
         description=_TASK_ANCHOR_DESC,
         max_length=512,
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_say_key(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "say" in data and "thought" not in data:
+            out = {k: v for k, v in data.items() if k != "say"}
+            out["thought"] = data.get("say", "") or ""
+            return out
+        return data
+
+    @model_validator(mode="after")
+    def _thought_default_from_instruction(self) -> "AgentResponse":
+        t = (self.thought or "").strip()
+        ins = (self.instruction or "").strip()
+        if not t and ins:
+            return self.model_copy(update={"thought": ins})
+        return self
 
 
 def action_args_dict(action: Action) -> dict[str, Any]:
@@ -89,10 +118,15 @@ Use "{}" when there are no parameters.
 wait: Hold your position when a physical action is still in progress or the scene is settling (e.g. after motion).
 Do not use wait instead of look_around, turning, or CLEAR when the anchored object is missing from the detection list.
 
-pick_up vs holding: If the session line says you are already inferring a held target and that class still appears in detections, treat that detection as likely the object in hand (first-person view). Do NOT issue another pick_up for the same held class until place or drop has cleared it.
+pick_up vs holding: If the session line says you are already inferring a held target and that class still appears in detections, treat that detection as likely the object in hand (first-person view). Do NOT issue another pick_up for that same held class until place or drop has cleared it.
 
 task_anchor field:
 - "" = keep current session anchor.
 - CLEAR = clear anchor (free exploration).
 - Other text = new anchor (use exact class names from grounded objects).
+
+JSON fields:
+- thought: dashboard / operator only (not TTS).
+- instruction: spoken line only when non-empty; empty when waiting with nothing new to say aloud.
 """
+

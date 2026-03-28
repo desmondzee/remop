@@ -42,12 +42,16 @@ type AgentVoice = {
 
 type AgentStepOk = {
   say: string;
+  instruction?: string;
   actions: AgentAction[];
   state_version?: number;
   task_anchor?: string;
   inferred_held_object?: string;
   voice?: AgentVoice;
 };
+
+/** Soft spacing between non-supersede TTS schedules (server also enforces VOICE_MIN_INTERVAL_SEC). */
+const CLIENT_TTS_MIN_GAP_MS = 250;
 
 function parseFastApiDetail(detail: unknown): string {
   if (typeof detail === "string") return detail;
@@ -140,6 +144,8 @@ export default function CameraOverlay() {
   const sessionIdRef = useRef<string | null>(null);
   /** True while Web Speech or Kokoro is playing or queued; drives POST is_tts_playing. */
   const isTtsPlayingRef = useRef(false);
+  const ttsPendingTimerRef = useRef<number | null>(null);
+  const lastNonSupersedeTtsAtRef = useRef(0);
 
   const [streaming, setStreaming] = useState(false);
   const [status, setStatus] = useState("Idle — click Start camera");
@@ -151,6 +157,7 @@ export default function CameraOverlay() {
   /** Client-only (null on SSR/first paint) so hydration matches; set in useEffect. */
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [agentSay, setAgentSay] = useState("");
+  const [agentInstruction, setAgentInstruction] = useState("");
   const [agentActions, setAgentActions] = useState<AgentAction[]>([]);
   const [agentVoice, setAgentVoice] = useState<AgentVoice | null>(null);
   const [agentTaskAnchor, setAgentTaskAnchor] = useState("");
@@ -178,10 +185,11 @@ export default function CameraOverlay() {
     const ow = overlay.width;
     const oh = overlay.height;
     ctx.clearRect(0, 0, ow, oh);
-    if (!data.detections?.length) return;
+    const dets = data.detections;
+    if (!Array.isArray(dets) || dets.length === 0) return;
     ctx.lineWidth = 2;
     ctx.font = "14px system-ui, sans-serif";
-    for (const d of data.detections) {
+    for (const d of dets) {
       const x = d.x1 * ow;
       const y = d.y1 * oh;
       const w = (d.x2 - d.x1) * ow;
@@ -348,7 +356,12 @@ export default function CameraOverlay() {
     streamingRef.current = false;
     setStreaming(false);
     setAgentSay("");
+    setAgentInstruction("");
     setAgentActions([]);
+    if (ttsPendingTimerRef.current) {
+      window.clearTimeout(ttsPendingTimerRef.current);
+      ttsPendingTimerRef.current = null;
+    }
     setAgentNote("");
     setInferReady(false);
     resetAgentTts();
@@ -542,6 +555,9 @@ export default function CameraOverlay() {
         const ok = body as AgentStepOk;
         if (ok && typeof ok.say === "string") {
           setAgentSay(ok.say);
+          setAgentInstruction(
+            typeof ok.instruction === "string" ? ok.instruction : ""
+          );
           setAgentActions(Array.isArray(ok.actions) ? ok.actions : []);
           setAgentTaskAnchor(
             typeof ok.task_anchor === "string" ? ok.task_anchor : ""
@@ -561,13 +577,32 @@ export default function CameraOverlay() {
               ? v
               : null
           );
-          if (
-            v &&
-            typeof v.speak === "string" &&
-            v.should_speak
-          ) {
-            speakInstruction(v.speak, { supersede: v.supersede });
-            setTtsQueueLen(getTtsQueueDepth());
+          if (v && typeof v.speak === "string" && v.should_speak) {
+            const line = v.speak.trim();
+            if (line) {
+              if (ttsPendingTimerRef.current) {
+                window.clearTimeout(ttsPendingTimerRef.current);
+                ttsPendingTimerRef.current = null;
+              }
+              const supersede = v.supersede;
+              const flush = () => {
+                speakInstruction(line, { supersede });
+                setTtsQueueLen(getTtsQueueDepth());
+                if (!supersede) {
+                  lastNonSupersedeTtsAtRef.current = Date.now();
+                }
+              };
+              if (supersede) {
+                flush();
+              } else {
+                const elapsed = Date.now() - lastNonSupersedeTtsAtRef.current;
+                const delay = Math.max(0, CLIENT_TTS_MIN_GAP_MS - elapsed);
+                ttsPendingTimerRef.current = window.setTimeout(() => {
+                  ttsPendingTimerRef.current = null;
+                  flush();
+                }, delay);
+              }
+            }
           }
           setAgentNote("");
         }
@@ -585,6 +620,10 @@ export default function CameraOverlay() {
     return () => {
       cancelled = true;
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      if (ttsPendingTimerRef.current) {
+        window.clearTimeout(ttsPendingTimerRef.current);
+        ttsPendingTimerRef.current = null;
+      }
     };
   }, [streaming, sessionId, wsUrl, inferReady]);
 
@@ -725,7 +764,7 @@ export default function CameraOverlay() {
           ) : null}
           <div className="mt-3">
             <p className="text-xs font-medium text-emerald-900/80 dark:text-emerald-200/90">
-              Instruction
+              Agent status (dashboard / thought)
             </p>
             <p className="mt-1 text-lg font-semibold leading-snug text-emerald-950 dark:text-emerald-50">
               {agentSay || "—"}
@@ -745,7 +784,10 @@ export default function CameraOverlay() {
             {agentVoice ? (
               <ul className="mt-2 space-y-1 font-mono text-xs text-emerald-900 dark:text-emerald-100">
                 <li>phase: {agentVoice.phase}</li>
-                <li>speak: {agentVoice.speak || "—"}</li>
+                <li>
+                  instruction (model): {agentInstruction.trim() || "—"}
+                </li>
+                <li>speak (gate out): {agentVoice.speak || "—"}</li>
                 <li>
                   should_speak: {String(agentVoice.should_speak)} · supersede:{" "}
                   {String(agentVoice.supersede)}

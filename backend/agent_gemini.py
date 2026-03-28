@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from google import genai
@@ -16,8 +17,35 @@ from agent_tools import (
     AgentResponse,
     action_args_dict,
 )
+from gemini_session_log import append_gemini_log
 
 _client: genai.Client | None = None
+
+
+def _serialize_gemini_response(resp: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    try:
+        t = getattr(resp, "text", None)
+        if t is not None:
+            out["text"] = t
+    except Exception:
+        out["text"] = None
+    try:
+        um = getattr(resp, "usage_metadata", None)
+        if um is not None:
+            if hasattr(um, "model_dump"):
+                out["usage_metadata"] = um.model_dump()
+            else:
+                out["usage_metadata"] = str(um)
+    except Exception:
+        pass
+    try:
+        pf = getattr(resp, "prompt_feedback", None)
+        if pf is not None:
+            out["prompt_feedback"] = str(pf)
+    except Exception:
+        pass
+    return out
 
 DEFAULT_HIGH_LEVEL_INTENTION = """You are a curious and helpful high-level planner for a household tidying assistant (like a home robot).
 Your ongoing intention is to keep living spaces orderly: notice clutter such as shoes, bottles, clothes, or loose objects on the floor or messy surfaces;
@@ -32,12 +60,13 @@ CONTINUITY_AND_ANCHOR_RULES = """
 """
 
 PHYSICAL_EVIDENCE_AND_HOLDING = """
-## Physical evidence, say, and tools
-- Tools are requests to the human, not facts. Do not use past tense in say for pick_up, place, drop, or motion unless the current image and grounding support completion (e.g. object gone from floor, clear interaction, or last outcome / human feedback says so).
-- Right after pick_up in actions, say should stay imperative or ask them to hold steady while you verify; use wait and/or look_around before claiming success.
-- Choose placement yourself: use place with target and near drawn from visible grounded classes. Do not ask the human an open-ended "where should I put it?" in say unless last outcome explicitly requires it.
+## Physical evidence, thought, instruction, and tools
+- Tools are requests to the human, not facts. Do not use past tense in thought for pick_up, place, drop, or motion unless the current image and grounding support completion (e.g. object gone from floor, clear interaction, or last outcome / human feedback says so).
+- Right after pick_up in actions, keep issuing pick_up in subsequent ticks until the image or feedback shows progress; use wait only when the scene is genuinely settling (see intent persistence below).
+- Choose placement yourself: use place with target and near drawn from visible grounded classes. Do not ask the human an open-ended "where should I put it?" in thought unless last outcome explicitly requires it.
 - If the user message includes an inferred held target matching a detection class, assume that detection may be the object in hand in first-person view. Do NOT issue pick_up again for that same held class; proceed toward place using other visible classes as near targets.
-- If last outcome / human feedback contradicts what you see (e.g. they dropped the item), align say and actions; use CLEAR or a new anchor if needed.
+- If last outcome / human feedback contradicts what you see (e.g. they dropped the item), align thought and actions; use CLEAR or a new anchor if needed.
+- Intent persistence: If you issue a physical command (move_forward, move_backward, turn_left, turn_right, pick_up, place, drop, look_around), you MUST keep the same primary motor intent in actions on subsequent ticks until the image or last_outcome shows completion or clear failure. Do not drop that command for wait or look_around alone on the very next tick while the human may still be executing it—otherwise downstream speech may never reflect the skipped step. Re-issue the same tool until evidence; use wait when motion is still in progress per cooldown hints.
 """
 
 PERCEPTION_AND_SCHEMA_BLOCK = f"""You see one still frame (WebP) plus a JSON list of grounded objects. Fields use normalized image coordinates cx, cy in [0,1].
@@ -45,8 +74,10 @@ cz is a rough step-equivalent forward distance from monocular depth (calibrated 
 
 {ACTION_REGISTRY_PROMPT}
 
-Output valid JSON only matching the schema: say, actions, and task_anchor.
-The say field must be one complete sentence suitable to read aloud to the human; do not put tool names or JSON inside say.
+Output valid JSON only matching the schema: thought, instruction, actions, and task_anchor.
+- thought: operator dashboard only (status, reasoning, conversational allowed). Not read aloud.
+- instruction: text-to-speech only when non-empty; second-person imperatives; empty when waiting with nothing new to say aloud. Follow the instruction field rules in the schema (banned words, no questions).
+- task_anchor: do not output punctuation-only or whitespace-only anchors; use "" to keep, CLEAR to clear, or a short object class name.
 Be concise. Prefer one clear next step. Safety first."""
 
 
@@ -137,7 +168,8 @@ def _user_text(
         parts.append(
             "Recent action labels (rolling): "
             + json.dumps(recent_actions)
-            + " Avoid useless repetition; if stuck, use look_around, reorient, wait, or CLEAR the anchor per rules."
+            + " Re-issuing the SAME physical tool across ticks until the image or last_outcome shows progress is allowed and encouraged (intent persistence). "
+            "Avoid spamming different conflicting motions (e.g. rapid place vs pick_up flip-flop). If stuck, use look_around, reorient, wait, or CLEAR the anchor per rules."
         )
     if last_issued_action_labels:
         parts.append("Last step action labels: " + json.dumps(last_issued_action_labels))
@@ -152,7 +184,7 @@ def _user_text(
         if any(b in MOTION_ACTION_NAMES for b in bases):
             parts.append(
                 f"Only {seconds_since_last_step:.2f}s since last agent step; last step used motion. "
-                "If execution is likely still in progress, use wait with args_json \"{}\" or a brief say; "
+                "If execution is likely still in progress, use wait with args_json \"{}\" or a brief thought line; "
                 "do not repeat the same motion tool unless the view clearly shows it failed."
             )
     if goal:
@@ -162,7 +194,10 @@ def _user_text(
             f"Last outcome / human feedback: {last_outcome} "
             "(Trust this over your assumptions if it contradicts the scene.)"
         )
-    parts.append("What should the human do next?")
+    parts.append(
+        "Respond with JSON: one physical next step for the human and the matching actions. "
+        "Use thought for operator-facing status; use instruction only for a short imperative spoken line, or \"\" if nothing new to say aloud."
+    )
     return "\n".join(parts)
 
 
@@ -178,6 +213,7 @@ def run_agent_sync(
     seconds_since_last_step: float | None = None,
     last_issued_action_labels: list[str] | None = None,
     inferred_held_object: str = "",
+    session_id: str = "",
 ) -> AgentResponse:
     client = _get_client()
     last_issued = list(last_issued_action_labels or [])
@@ -203,18 +239,58 @@ def run_agent_sync(
         response_schema=AgentResponse,
         max_output_tokens=_max_output_tokens(),
     )
-    resp = client.models.generate_content(
-        model=_model_id(),
-        contents=contents,
-        config=config,
-    )
-    if resp.parsed is not None and isinstance(resp.parsed, AgentResponse):
-        return resp.parsed
-    raw = (resp.text or "").strip()
-    if not raw:
-        raise RuntimeError("empty Gemini response")
-    data = json.loads(raw)
-    return AgentResponse.model_validate(data)
+    model = _model_id()
+    log_sid = (session_id or "").strip()
+    base_entry: dict[str, Any] = {
+        "ts_utc": datetime.now(timezone.utc).isoformat(),
+        "model": model,
+        "user_text": user,
+        "frame_webp_bytes": len(frame_webp),
+        "grounded": grounded,
+        "recent_actions": recent_actions,
+        "goal": goal,
+        "last_outcome": last_outcome,
+        "task_anchor": task_anchor,
+        "turn_log_excerpt": turn_log_excerpt,
+        "seconds_since_last_step": seconds_since_last_step,
+        "last_issued_action_labels": last_issued,
+        "inferred_held_object": inferred_held_object,
+        "max_output_tokens": _max_output_tokens(),
+    }
+    logged = False
+    try:
+        resp = client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=config,
+        )
+        base_entry["gemini_response"] = _serialize_gemini_response(resp)
+        if resp.parsed is not None and isinstance(resp.parsed, AgentResponse):
+            base_entry["agent_response"] = resp.parsed.model_dump()
+            if log_sid:
+                append_gemini_log(log_sid, base_entry)
+                logged = True
+            return resp.parsed
+        raw = (resp.text or "").strip()
+        if not raw:
+            base_entry["error"] = "empty Gemini response"
+            if log_sid:
+                append_gemini_log(log_sid, base_entry)
+                logged = True
+            raise RuntimeError("empty Gemini response")
+        data = json.loads(raw)
+        parsed = AgentResponse.model_validate(data)
+        base_entry["agent_response"] = parsed.model_dump()
+        if log_sid:
+            append_gemini_log(log_sid, base_entry)
+            logged = True
+        return parsed
+    except Exception as e:
+        if not logged:
+            base_entry["error"] = repr(e)
+            if log_sid:
+                append_gemini_log(log_sid, base_entry)
+        raise
 
 
 async def run_agent(
@@ -229,6 +305,7 @@ async def run_agent(
     seconds_since_last_step: float | None = None,
     last_issued_action_labels: list[str] | None = None,
     inferred_held_object: str = "",
+    session_id: str = "",
 ) -> AgentResponse:
     return await asyncio.to_thread(
         run_agent_sync,
@@ -242,6 +319,7 @@ async def run_agent(
         seconds_since_last_step=seconds_since_last_step,
         last_issued_action_labels=last_issued_action_labels,
         inferred_held_object=inferred_held_object,
+        session_id=session_id,
     )
 
 
