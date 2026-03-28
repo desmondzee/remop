@@ -1,5 +1,5 @@
 """
-Shared YOLO26 + MiDaS 3.1 inference for CLI webcam and FastAPI WebSocket server.
+Shared Ultralytics YOLO detection + MiDaS 3.1 inference for CLI webcam and FastAPI WebSocket server.
 """
 
 from __future__ import annotations

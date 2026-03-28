@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Real-time webcam: Ultralytics YOLO26 detection plus MiDaS 3.1 DPT Swin2 Tiny 256 depth
+Real-time webcam: Ultralytics YOLO detection plus MiDaS 3.1 DPT Swin2 Tiny 256 depth
 sampled at each box center. Relative depth is disparity-style (larger ≈ closer).
+
+Default detector weights are Open Images v7 (see README for Objects365 vs OIV7).
 
 Usage:
   cd backend && pip install -r requirements.txt
-  python yolo26_depth_webcam.py [--model yolo26n.pt] [--source 0] [--no-depth-panel]
+  python yolo26_depth_webcam.py [--model yolov8n-oiv7.pt] [--source 0] [--no-depth-panel]
 
 MiDaS is loaded from PyTorch Hub (isl-org/MiDaS:v3_1) with DPT_SwinV2_T_256; timm is pinned in
 requirements.txt so checkpoint and Swin backbone shapes stay aligned.
@@ -25,8 +27,12 @@ from vision_pipeline import VisionPipeline, depth_to_colormap_bgr, pick_device
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="YOLO26 + MiDaS 3.1 webcam depth at detections.")
-    p.add_argument("--model", default="yolo26n.pt", help="Ultralytics YOLO26 weights or YAML.")
+    p = argparse.ArgumentParser(description="YOLO + MiDaS 3.1 webcam depth at detections.")
+    p.add_argument(
+        "--model",
+        default="yolov8n-oiv7.pt",
+        help="Ultralytics detector weights (e.g. yolov8n-oiv7.pt) or model YAML.",
+    )
     p.add_argument(
         "--source",
         default="0",
@@ -67,7 +73,7 @@ def main() -> int:
         cap.release()
         return 1
 
-    window = "YOLO26 + MiDaS depth"
+    window = "YOLO + MiDaS depth"
     last_print = time.monotonic()
     print_interval_s = 0.5
 

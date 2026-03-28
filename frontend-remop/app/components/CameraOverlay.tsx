@@ -10,6 +10,9 @@ const FMT_WEBP = 2;
 const WEBP_QUALITY = 0.5;
 const JPEG_QUALITY = 0.72;
 
+/** Backend /ws/infer?model=… presets (see inference_server.MODEL_PRESETS). */
+type DetectorPreset = "oiv7" | "coco";
+
 type Detection = {
   label: string;
   conf: number;
@@ -42,6 +45,23 @@ function supportsWebpEncode(): Promise<boolean> {
   });
 }
 
+function labelLooksLikeContinuity(label: string): boolean {
+  const s = label.toLowerCase();
+  return (
+    s.includes("continuity") ||
+    s.includes("iphone") ||
+    s.includes("ipad")
+  );
+}
+
+/** Pick a default device id: Continuity / iPhone-style label first, else first video input. */
+function defaultVideoDeviceId(devices: MediaDeviceInfo[]): string {
+  const v = devices.filter((d) => d.kind === "videoinput");
+  const named = v.find((d) => d.label && labelLooksLikeContinuity(d.label));
+  if (named?.deviceId) return named.deviceId;
+  return v[0]?.deviceId ?? "";
+}
+
 export default function CameraOverlay() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const captureRef = useRef<HTMLCanvasElement>(null);
@@ -55,10 +75,16 @@ export default function CameraOverlay() {
   const reconnectDelayRef = useRef(1000);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectWsRef = useRef<() => void>(() => {});
+  const switchingPresetRef = useRef(false);
+  const prevDetectorPresetRef = useRef<DetectorPreset>("oiv7");
 
   const [streaming, setStreaming] = useState(false);
   const [status, setStatus] = useState("Idle — click Start camera");
   const [wsUrl, setWsUrl] = useState(DEFAULT_WS);
+  const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState("");
+  const [devicesLoaded, setDevicesLoaded] = useState(false);
+  const [detectorPreset, setDetectorPreset] = useState<DetectorPreset>("oiv7");
 
   const clearReconnect = () => {
     if (reconnectTimerRef.current) {
@@ -98,8 +124,16 @@ export default function CameraOverlay() {
   const connectWs = useCallback(() => {
     clearReconnect();
     if (!streamingRef.current) return;
+    let urlToOpen = wsUrl;
     try {
-      const ws = new WebSocket(wsUrl);
+      const u = new URL(wsUrl);
+      u.searchParams.set("model", detectorPreset);
+      urlToOpen = u.toString();
+    } catch {
+      /* keep wsUrl if not parseable */
+    }
+    try {
+      const ws = new WebSocket(urlToOpen);
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
       setStatus("Connecting…");
@@ -126,6 +160,11 @@ export default function CameraOverlay() {
         wsRef.current = null;
         busyRef.current = false;
         if (!streamingRef.current) return;
+        if (switchingPresetRef.current) {
+          switchingPresetRef.current = false;
+          connectWsRef.current();
+          return;
+        }
         setStatus("Disconnected — reconnecting…");
         const delay = reconnectDelayRef.current;
         reconnectDelayRef.current = Math.min(delay * 2, 10_000);
@@ -134,11 +173,52 @@ export default function CameraOverlay() {
     } catch {
       setStatus("Invalid WebSocket URL");
     }
-  }, [wsUrl, drawDetections]);
+  }, [wsUrl, detectorPreset, drawDetections]);
 
   useEffect(() => {
     connectWsRef.current = connectWs;
   }, [connectWs]);
+
+  useEffect(() => {
+    if (!streaming) {
+      prevDetectorPresetRef.current = detectorPreset;
+      return;
+    }
+    if (prevDetectorPresetRef.current === detectorPreset) return;
+    prevDetectorPresetRef.current = detectorPreset;
+    switchingPresetRef.current = true;
+    clearReconnect();
+    wsRef.current?.close();
+  }, [streaming, detectorPreset]);
+
+  const refreshVideoDevices = useCallback(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    try {
+      const list = await navigator.mediaDevices.enumerateDevices();
+      const vids = list.filter((d) => d.kind === "videoinput");
+      setVideoDevices(vids);
+      setDevicesLoaded(true);
+      setSelectedDeviceId((prev) => {
+        if (prev && vids.some((d) => d.deviceId === prev)) return prev;
+        return defaultVideoDeviceId(vids);
+      });
+    } catch {
+      setDevicesLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    const md = navigator.mediaDevices;
+    if (!md) return;
+    const t = window.setTimeout(() => {
+      void refreshVideoDevices();
+    }, 0);
+    md.addEventListener("devicechange", refreshVideoDevices);
+    return () => {
+      window.clearTimeout(t);
+      md.removeEventListener("devicechange", refreshVideoDevices);
+    };
+  }, [refreshVideoDevices]);
 
   const stopCamera = useCallback(() => {
     streamingRef.current = false;
@@ -163,21 +243,29 @@ export default function CameraOverlay() {
       ctx?.clearRect(0, 0, o.width, o.height);
     }
     setStatus("Stopped");
-  }, []);
+    void refreshVideoDevices();
+  }, [refreshVideoDevices]);
 
   const startCamera = useCallback(async () => {
     if (streamingRef.current) return;
     const webpOk = await supportsWebpEncode();
     useWebpRef.current = webpOk;
     try {
+      await refreshVideoDevices();
+      const video: MediaTrackConstraints = {
+        width: { ideal: 640, max: 1280 },
+        height: { ideal: 360, max: 720 },
+      };
+      if (selectedDeviceId) {
+        video.deviceId = { exact: selectedDeviceId };
+      } else {
+        video.facingMode = "user";
+      }
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: "user",
-          width: { ideal: 640, max: 1280 },
-          height: { ideal: 360, max: 720 },
-        },
+        video,
         audio: false,
       });
+      void refreshVideoDevices();
       streamRef.current = stream;
       const v = videoRef.current;
       if (!v) return;
@@ -190,7 +278,7 @@ export default function CameraOverlay() {
     } catch (e) {
       setStatus(`Camera failed: ${e instanceof Error ? e.message : String(e)}`);
     }
-  }, [connectWs]);
+  }, [connectWs, refreshVideoDevices, selectedDeviceId]);
 
   const tick = useCallback(() => {
     if (document.visibilityState === "hidden") return;
@@ -306,6 +394,52 @@ export default function CameraOverlay() {
         </button>
         <span className="text-sm text-zinc-600 dark:text-zinc-400">{status}</span>
       </div>
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-end">
+        <label className="flex min-w-[180px] flex-col gap-1 text-sm text-zinc-600 dark:text-zinc-400">
+          Detector
+          <select
+            className="rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-900"
+            value={detectorPreset}
+            onChange={(e) => setDetectorPreset(e.target.value as DetectorPreset)}
+          >
+            <option value="oiv7">Open Images v7 (~601 classes)</option>
+            <option value="coco">MS COCO (~80 classes)</option>
+          </select>
+        </label>
+        <label className="flex min-w-[200px] flex-1 flex-col gap-1 text-sm text-zinc-600 dark:text-zinc-400">
+          Camera (macOS: choose Continuity Camera / iPhone if listed)
+          <select
+            className="rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-900"
+            value={selectedDeviceId}
+            onChange={(e) => setSelectedDeviceId(e.target.value)}
+            disabled={streaming}
+          >
+            {!devicesLoaded && <option value="">Loading cameras…</option>}
+            {devicesLoaded && videoDevices.length === 0 && (
+              <option value="">No camera found</option>
+            )}
+            {devicesLoaded &&
+              videoDevices.map((d, i) => (
+                <option key={d.deviceId || `cam-${i}`} value={d.deviceId}>
+                  {d.label || `Camera ${i + 1}`}
+                </option>
+              ))}
+          </select>
+        </label>
+        <button
+          type="button"
+          onClick={() => void refreshVideoDevices()}
+          disabled={streaming}
+          className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm dark:border-zinc-600"
+        >
+          Refresh cameras
+        </button>
+      </div>
+      <p className="text-xs text-zinc-500">
+        If labels show as &quot;Camera 1&quot;, allow access once; then refresh or pick the device
+        that matches your iPhone (Continuity). Do not use <code className="font-mono">facingMode</code>{" "}
+        when a specific camera is selected.
+      </p>
       <label className="flex flex-col gap-1 text-sm text-zinc-600 dark:text-zinc-400">
         Inference WebSocket URL
         <input
@@ -314,6 +448,10 @@ export default function CameraOverlay() {
           onChange={(e) => setWsUrl(e.target.value)}
           disabled={streaming}
         />
+        <span className="text-xs text-zinc-500">
+          The app appends <code className="font-mono">?model=oiv7</code> or{" "}
+          <code className="font-mono">?model=coco</code> from the Detector control.
+        </span>
       </label>
       <div className="relative inline-block max-w-full overflow-hidden rounded-lg border border-zinc-200 bg-black dark:border-zinc-700">
         <video

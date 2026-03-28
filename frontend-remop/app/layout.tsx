@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "remop",
-  description: "YOLO26 + MiDaS live camera overlay",
+  description: "YOLO + MiDaS live camera overlay",
 };
 
 export default function RootLayout({

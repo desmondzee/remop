@@ -1,6 +1,6 @@
 # remop
 
-Monorepo for the remop project: a Next.js frontend and a Python backend for perception experiments (Ultralytics YOLO26 plus MiDaS monocular depth).
+Monorepo for the remop project: a Next.js frontend and a Python backend for perception experiments (Ultralytics YOLO plus MiDaS monocular depth).
 
 ## Repository layout
 
@@ -35,7 +35,7 @@ cd backend && chmod +x serve.sh && ./serve.sh
 - **Health:** [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
 - **Frames:** WebSocket `ws://127.0.0.1:8000/ws/infer` — binary **WebP** or **JPEG** (optional leading byte: `0x02` WebP, `0x01` JPEG); response JSON `{ w, h, detections[] }` with normalized boxes and `rel_depth`.
 - **CORS:** set `INFERENCE_CORS_ORIGINS` (comma-separated) if the app is not on `localhost:3000`.
-- **Model:** `YOLO_MODEL` env overrides weights (default `yolo26n.pt`).
+- **Model:** The browser sends **`?model=oiv7`** or **`?model=coco`** on the inference WebSocket (see the Detector control in the UI). Weights: **oiv7** → `yolov8n-oiv7.pt` ([Open Images v7](https://docs.ultralytics.com/datasets/detect/open-images-v7/), 601 classes); **coco** → `yolov8n.pt` (MS COCO, 80 classes). Override paths with **`YOLO_MODEL_OIV7`**, **`YOLO_MODEL_COCO`**, or legacy **`YOLO_MODEL`** (same as oiv7 when `YOLO_MODEL_OIV7` is unset). **Objects365** has an official [dataset YAML](https://docs.ultralytics.com/datasets/detect/objects365/) for training, but no published `*-o365.pt` on Ultralytics assets.
 - **MiDaS stride:** `MIDAS_EVERY_N=2` reuses the previous depth map on alternating frames (faster, slightly stale depth).
 
 **PyTurboJPEG** speeds up **JPEG** decode. It expects **libjpeg-turbo** on the system (e.g. macOS: `brew install jpeg-turbo`). If TurboJPEG is missing, the server falls back to OpenCV. **WebP** frames are decoded with **Pillow**.
@@ -63,11 +63,11 @@ python yolo26_depth_webcam.py
 
 Press `q` to quit. Flags: `--model`, `--source`, `--no-depth-panel`.
 
-**Note:** First run downloads YOLO26 and MiDaS weights; `timm` is pinned in `requirements.txt` for MiDaS v3.1 compatibility.
+**Note:** First run downloads YOLO and MiDaS weights; `timm` is pinned in `requirements.txt` for MiDaS v3.1 compatibility.
 
 ## Optional: lower YOLO latency on Mac
 
-Exporting the detector to **CoreML** or **ONNX** can reduce latency on Apple Silicon; see the Ultralytics [export docs](https://docs.ultralytics.com/modes/export/) (`yolo export model=yolo26n.pt format=coreml` / `format=onnx`). The stock server loads `.pt` weights.
+Exporting the detector to **CoreML** or **ONNX** can reduce latency on Apple Silicon; see the Ultralytics [export docs](https://docs.ultralytics.com/modes/export/) (`yolo export model=yolov8n-oiv7.pt format=coreml` / `format=onnx`). The stock server loads `.pt` weights.
 
 ## License
 

@@ -11,7 +11,7 @@ from io import BytesIO
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from PIL import Image
 
@@ -86,16 +86,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_pipeline: VisionPipeline | None = None
 _infer_lock = asyncio.Lock()
+# Preset -> weights path (lazy-loaded). Override with YOLO_MODEL_OIV7 / YOLO_MODEL_COCO.
+MODEL_PRESETS: dict[str, str] = {
+    "oiv7": os.environ.get("YOLO_MODEL_OIV7")
+    or os.environ.get("YOLO_MODEL", "yolov8n-oiv7.pt"),
+    "coco": os.environ.get("YOLO_MODEL_COCO", "yolov8n.pt"),
+}
+_pipelines: dict[str, VisionPipeline] = {}
 
 
-def get_pipeline() -> VisionPipeline:
-    global _pipeline
-    if _pipeline is None:
-        model = os.environ.get("YOLO_MODEL", "yolo26n.pt")
-        _pipeline = VisionPipeline(model, device=pick_device())
-    return _pipeline
+def _normalize_model_query(raw: str | None) -> str:
+    key = (raw or "oiv7").strip().lower()
+    return key if key in MODEL_PRESETS else "oiv7"
+
+
+def get_pipeline_for_preset(preset: str) -> VisionPipeline:
+    key = _normalize_model_query(preset)
+    path = MODEL_PRESETS[key]
+    if path not in _pipelines:
+        _pipelines[path] = VisionPipeline(path, device=pick_device())
+    return _pipelines[path]
+
+
+async def _send_json_safe(ws: WebSocket, payload: dict) -> bool:
+    try:
+        await ws.send_json(payload)
+        return True
+    except Exception:
+        return False
 
 
 @app.get("/health")
@@ -106,6 +125,7 @@ def health() -> dict[str, str]:
 @app.websocket("/ws/infer")
 async def ws_infer(ws: WebSocket) -> None:
     await ws.accept()
+    model_preset = _normalize_model_query(ws.query_params.get("model"))
     loop = asyncio.get_event_loop()
     try:
         while True:
@@ -113,13 +133,16 @@ async def ws_infer(ws: WebSocket) -> None:
             async with _infer_lock:
                 try:
                     frame = await loop.run_in_executor(None, decode_image_bytes, data)
-                    pipeline = get_pipeline()
+                    pipeline = get_pipeline_for_preset(model_preset)
                     out = await loop.run_in_executor(None, pipeline.infer, frame)
-                    await ws.send_json(out)
+                    if not await _send_json_safe(ws, out):
+                        return
                 except Exception as e:
-                    await ws.send_json(
-                        {"error": str(e), "w": 0, "h": 0, "detections": []}
-                    )
+                    if not await _send_json_safe(
+                        ws,
+                        {"error": str(e), "w": 0, "h": 0, "detections": []},
+                    ):
+                        return
     except WebSocketDisconnect:
         return
 
@@ -127,4 +150,4 @@ async def ws_infer(ws: WebSocket) -> None:
 @app.on_event("startup")
 async def startup() -> None:
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, get_pipeline)
+    await loop.run_in_executor(None, get_pipeline_for_preset, "oiv7")
