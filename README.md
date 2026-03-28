@@ -56,6 +56,8 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000). Use **Start camera** (required for Safari / user-gesture rules). The UI sends **WebP** when supported, otherwise **JPEG**, using ping-pong pacing with `requestAnimationFrame`.
 
+**Agent TTS (instructions only):** Spoken audio uses **`voice.speak`** only when **`voice.should_speak`** is true (never raw **`say`**). **Start camera** unlocks audio on iOS/Safari: a silent Web Speech utterance plus **`AudioContext.resume()`** for optional neural playback. Default engine is **browser (Web Speech)**; choose **Neural (Kokoro)** in the UI for on-device synthesis (first load downloads model weights; WebGPU when available, else WASM). Env: [`frontend-remop/.env.example`](frontend-remop/.env.example) — `NEXT_PUBLIC_TTS_ENGINE`, `NEXT_PUBLIC_KOKORO_VOICE`. Kokoro currently runs on the **main thread** after dynamic import; heavy loads may briefly affect the camera loop.
+
 Use **`wss://`** and **HTTPS** in production so the camera API works outside localhost.
 
 ## Local OpenCV demo (no browser)

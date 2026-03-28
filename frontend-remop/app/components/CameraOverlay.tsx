@@ -1,6 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  getIsTtsPlaying,
+  getTtsEngine,
+  getTtsQueueDepth,
+  prefetchKokoro,
+  resetAgentTts,
+  setTtsEngine,
+  speakInstruction,
+  subscribeKokoroStatus,
+  subscribeTtsPlaying,
+  unlockAudioFromUserGesture,
+  type TtsEngine,
+} from "../lib/agentTts";
 
 const DEFAULT_WS =
   process.env.NEXT_PUBLIC_INFERENCE_WS_URL ?? "ws://127.0.0.1:8000/ws/infer";
@@ -125,11 +138,8 @@ export default function CameraOverlay() {
   const agentStepInFlightRef = useRef(false);
   const inferReadyRef = useRef(false);
   const sessionIdRef = useRef<string | null>(null);
-  /** True while HTMLAudioElement is producing sound (future Kokoro); drives POST is_tts_playing. */
+  /** True while Web Speech or Kokoro is playing or queued; drives POST is_tts_playing. */
   const isTtsPlayingRef = useRef(false);
-  const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
-  /** Stub queue for TTS lines until Kokoro is wired; supersede replaces, else append. */
-  const ttsQueueRef = useRef<string[]>([]);
 
   const [streaming, setStreaming] = useState(false);
   const [status, setStatus] = useState("Idle — click Start camera");
@@ -146,6 +156,8 @@ export default function CameraOverlay() {
   const [agentTaskAnchor, setAgentTaskAnchor] = useState("");
   const [agentInferredHeld, setAgentInferredHeld] = useState("");
   const [ttsQueueLen, setTtsQueueLen] = useState(0);
+  const [ttsEngine, setTtsEngineState] = useState<TtsEngine>(() => getTtsEngine());
+  const [kokoroLoadLabel, setKokoroLoadLabel] = useState("");
   const [agentNote, setAgentNote] = useState("");
   /** Backend LATEST_STATE exists only after at least one successful infer for this session. */
   const [inferReady, setInferReady] = useState(false);
@@ -194,29 +206,32 @@ export default function CameraOverlay() {
   }, []);
 
   useEffect(() => {
-    const el = ttsAudioRef.current;
-    if (!el) return;
-    const setPlaying = (v: boolean) => {
+    return subscribeTtsPlaying((v) => {
       isTtsPlayingRef.current = v;
-    };
-    const onPlaying = () => setPlaying(true);
-    const onEnded = () => {
-      setPlaying(false);
-      // TODO(kokoro): shift ttsQueueRef, play next clip on el.src / decodeAudioData
-    };
-    const onPause = () => {
-      if (el.currentTime > 0 && !el.ended) return;
-      setPlaying(false);
-    };
-    el.addEventListener("playing", onPlaying);
-    el.addEventListener("ended", onEnded);
-    el.addEventListener("pause", onPause);
-    return () => {
-      el.removeEventListener("playing", onPlaying);
-      el.removeEventListener("ended", onEnded);
-      el.removeEventListener("pause", onPause);
-    };
+    });
   }, []);
+
+  useEffect(() => {
+    return subscribeKokoroStatus(({ status, detail }) => {
+      if (status === "idle") setKokoroLoadLabel("");
+      else if (status === "loading") setKokoroLoadLabel("Loading neural voice…");
+      else if (status === "ready") setKokoroLoadLabel(`Neural ready (${detail})`);
+      else setKokoroLoadLabel(`Neural error: ${detail}`);
+    });
+  }, []);
+
+  useEffect(() => {
+    setTtsEngine(ttsEngine);
+  }, [ttsEngine]);
+
+  useEffect(() => {
+    if (!streaming) return;
+    const id = window.setInterval(() => {
+      setTtsQueueLen(getTtsQueueDepth());
+      isTtsPlayingRef.current = getIsTtsPlaying();
+    }, 400);
+    return () => window.clearInterval(id);
+  }, [streaming]);
 
   const connectWs = useCallback(() => {
     clearReconnect();
@@ -336,6 +351,8 @@ export default function CameraOverlay() {
     setAgentActions([]);
     setAgentNote("");
     setInferReady(false);
+    resetAgentTts();
+    setTtsQueueLen(0);
     clearReconnect();
     busyRef.current = false;
     cancelAnimationFrame(rafRef.current);
@@ -386,6 +403,8 @@ export default function CameraOverlay() {
       await v.play();
       streamingRef.current = true;
       setStreaming(true);
+      unlockAudioFromUserGesture();
+      if (getTtsEngine() === "kokoro") prefetchKokoro();
       setStatus(webpOk ? "Camera on (WebP)" : "Camera on (JPEG fallback)");
     } catch (e) {
       setStatus(`Camera failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -474,7 +493,7 @@ export default function CameraOverlay() {
     ).replace(/\/$/, "");
     const gapMs = 750;
     let cancelled = false;
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let timeoutId: number | undefined;
 
     const stepOnce = async () => {
       if (cancelled || !streamingRef.current) return;
@@ -547,15 +566,8 @@ export default function CameraOverlay() {
             typeof v.speak === "string" &&
             v.should_speak
           ) {
-            // TODO(kokoro): feed v.speak to on-device synth instead of queue stub
-            if (v.supersede) {
-              ttsQueueRef.current = [v.speak];
-              setTtsQueueLen(1);
-              ttsAudioRef.current?.pause();
-            } else {
-              ttsQueueRef.current.push(v.speak);
-              setTtsQueueLen(ttsQueueRef.current.length);
-            }
+            speakInstruction(v.speak, { supersede: v.supersede });
+            setTtsQueueLen(getTtsQueueDepth());
           }
           setAgentNote("");
         }
@@ -605,6 +617,24 @@ export default function CameraOverlay() {
   return (
     <div className="flex w-full max-w-4xl flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2">
+        <label className="flex items-center gap-2 text-sm text-zinc-600 dark:text-zinc-400">
+          Voice
+          <select
+            className="rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-600 dark:bg-zinc-900"
+            value={ttsEngine}
+            disabled={streaming}
+            onChange={(e) => {
+              const next = e.target.value as TtsEngine;
+              resetAgentTts();
+              setTtsEngineState(next);
+              setTtsQueueLen(0);
+              if (next === "kokoro" && streamingRef.current) prefetchKokoro();
+            }}
+          >
+            <option value="browser">Browser (Web Speech)</option>
+            <option value="kokoro">Neural (Kokoro, on-device)</option>
+          </select>
+        </label>
         <button
           type="button"
           onClick={startCamera}
@@ -721,9 +751,12 @@ export default function CameraOverlay() {
                   {String(agentVoice.supersede)}
                 </li>
                 <li className="text-zinc-600 dark:text-zinc-400">
-                  TTS queue (stub): {ttsQueueLen} · is_tts_playing (ref):{" "}
+                  TTS queue (approx): {ttsQueueLen} · is_tts_playing (ref):{" "}
                   {String(isTtsPlayingRef.current)}
                 </li>
+                {kokoroLoadLabel ? (
+                  <li className="text-zinc-600 dark:text-zinc-400">{kokoroLoadLabel}</li>
+                ) : null}
               </ul>
             ) : (
               <p className="mt-2 text-xs text-zinc-500">No voice object in response</p>
@@ -767,7 +800,6 @@ export default function CameraOverlay() {
         />
       </div>
       <canvas ref={captureRef} className="hidden" aria-hidden />
-      <audio ref={ttsAudioRef} className="hidden" playsInline aria-hidden />
       <p className="text-xs text-zinc-500">
         Safari: use Start camera after page load. Tab away pauses capture; WebSocket
         reconnects with backoff. Run the Python server from <code className="font-mono">backend/</code>.
