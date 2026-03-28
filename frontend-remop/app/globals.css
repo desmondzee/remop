@@ -3,21 +3,25 @@
 :root {
   --tw-bg-deep: #050608;
   --tw-bg-mid: #0c0e12;
-  --tw-panel: rgba(18, 22, 30, 0.52);
-  --tw-panel-strong: rgba(24, 30, 42, 0.65);
-  /* Hairline only — avoids a lit “rim” around cards */
-  --tw-glass-border: rgba(255, 255, 255, 0.03);
-  --tw-glass-highlight: rgba(255, 255, 255, 0.055);
+  /* Opaque enough for body text on busy camera/video (readability over glass). */
+  --tw-panel: rgba(16, 20, 28, 0.82);
+  --tw-panel-strong: rgba(20, 26, 36, 0.9);
+  /* Slightly stronger rim so panels read as surfaces, not washed-out film */
+  --tw-glass-border: rgba(255, 255, 255, 0.08);
+  --tw-glass-highlight: rgba(255, 255, 255, 0.1);
+  /* Heavy frosted blur so live video motion doesn’t compete with HUD text (see glass-panel). */
+  --tw-glass-blur: 40px;
+  --tw-glass-blur-strong: 52px;
   /*
    * No inset / no tight Y-offset shadows (those read as a visible edge).
    * Negative spread pulls umbra away from the border so the silhouette blends.
    */
   --tw-glass-elev-shadow:
-    0 28px 56px -18px rgba(0, 0, 0, 0.05),
-    0 48px 96px -28px rgba(0, 0, 0, 0.035);
+    0 28px 56px -18px rgba(0, 0, 0, 0.12),
+    0 48px 96px -28px rgba(0, 0, 0, 0.08);
   --tw-glass-elev-shadow-strong:
-    0 32px 64px -18px rgba(0, 0, 0, 0.065),
-    0 56px 112px -32px rgba(0, 0, 0, 0.045);
+    0 32px 64px -18px rgba(0, 0, 0, 0.14),
+    0 56px 112px -32px rgba(0, 0, 0, 0.09);
   --tw-accent: #3b9eff;
   --tw-accent-glow: rgba(59, 158, 255, 0.35);
   --tw-teal: #2ee6c8;
@@ -71,8 +75,8 @@ body {
 /* Frosted glass panel */
 .glass-panel {
   background: var(--tw-panel);
-  backdrop-filter: blur(22px) saturate(1.35);
-  -webkit-backdrop-filter: blur(22px) saturate(1.35);
+  backdrop-filter: blur(var(--tw-glass-blur)) saturate(1.2);
+  -webkit-backdrop-filter: blur(var(--tw-glass-blur)) saturate(1.2);
   border: 1px solid var(--tw-glass-border);
   border-radius: 1.25rem;
   box-shadow: var(--tw-glass-elev-shadow);
@@ -80,8 +84,8 @@ body {
 
 .glass-panel-strong {
   background: var(--tw-panel-strong);
-  backdrop-filter: blur(28px) saturate(1.4);
-  -webkit-backdrop-filter: blur(28px) saturate(1.4);
+  backdrop-filter: blur(var(--tw-glass-blur-strong)) saturate(1.22);
+  -webkit-backdrop-filter: blur(var(--tw-glass-blur-strong)) saturate(1.22);
   border: 1px solid var(--tw-glass-highlight);
   border-radius: 1.5rem;
   box-shadow: var(--tw-glass-elev-shadow-strong);
@@ -159,7 +163,7 @@ body {
 }
 
 .glass-input {
-  background: rgba(0, 0, 0, 0.35);
+  background: rgba(0, 0, 0, 0.55);
   border: 1px solid var(--tw-glass-border);
   border-radius: 0.75rem;
   color: var(--foreground);
@@ -186,9 +190,9 @@ body {
 }
 
 .glass-btn-ghost {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.08);
   border: 1px solid var(--tw-glass-border);
-  color: rgba(255, 255, 255, 0.88);
+  color: rgba(255, 255, 255, 0.92);
   border-radius: 0.75rem;
 }
 .glass-btn-ghost:hover:not(:disabled) {
@@ -204,5 +208,5 @@ body {
   font-size: 0.65rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.45);
+  color: rgba(255, 255, 255, 0.62);
 }

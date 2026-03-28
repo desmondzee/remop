@@ -88,7 +88,7 @@ export function SettingsModal({
       <button
         type="button"
         aria-label="Close settings"
-        className="absolute inset-0 bg-black/45 backdrop-blur-sm transition-opacity"
+        className="absolute inset-0 bg-black/58 backdrop-blur-2xl transition-opacity"
         onClick={onClose}
       />
       <div
@@ -102,8 +102,8 @@ export function SettingsModal({
           <h2 id={titleId} className="mono-caps text-white/90">
             Settings
           </h2>
-          <p className="mt-1.5 font-mono text-[10px] text-white/32 sm:text-[11px]">
-            ⌘ . or Ctrl . to toggle · Esc or backdrop to close
+          <p className="mt-1.5 font-mono text-[10px] text-white/52 sm:text-[11px]">
+            Press ⌘ . or Ctrl . to open or close (no toolbar button) · Esc or backdrop to close
           </p>
         </header>
 
@@ -118,7 +118,7 @@ export function SettingsModal({
           </div>
 
           <div className="mt-6 min-w-0 border-t border-white/10 pt-6">
-            <p className="mono-caps whitespace-nowrap text-white/45">Voice</p>
+            <p className="mono-caps whitespace-nowrap text-white/62">Voice</p>
             <select
               className="glass-input mt-2 w-full px-3 py-2.5 text-sm"
               value={ttsEngine}
@@ -136,7 +136,7 @@ export function SettingsModal({
             {ttsEngine === "openai" ? (
               <div className="mt-3 space-y-3">
                 <div>
-                  <p className="mono-caps text-[10px] text-white/38">OpenAI voice</p>
+                  <p className="mono-caps text-[10px] text-white/52">OpenAI voice</p>
                   <select
                     className="glass-input mt-1.5 w-full px-3 py-2.5 text-sm"
                     value={openaiVoice}
@@ -154,7 +154,7 @@ export function SettingsModal({
                     ))}
                   </select>
                 </div>
-                <label className="flex cursor-pointer items-center gap-2 font-mono text-xs text-white/50">
+                <label className="flex cursor-pointer items-center gap-2 font-mono text-xs text-white/68">
                   <input
                     type="checkbox"
                     className="rounded border-white/20"
@@ -171,7 +171,7 @@ export function SettingsModal({
               </div>
             ) : null}
             {openaiTtsLabel ? (
-              <p className="mt-2 font-mono text-[10px] text-white/40">{openaiTtsLabel}</p>
+              <p className="mt-2 font-mono text-[10px] text-white/55">{openaiTtsLabel}</p>
             ) : null}
             <button
               type="button"
@@ -205,7 +205,7 @@ export function SettingsModal({
           </div>
 
           <div className="mt-6 min-w-0">
-            <p className="mono-caps whitespace-nowrap text-white/45">Detector</p>
+            <p className="mono-caps whitespace-nowrap text-white/62">Detector</p>
             <select
               className="glass-input mt-2 w-full min-w-0 whitespace-nowrap px-3 py-2.5 text-sm"
               value={detectorPreset}
@@ -218,7 +218,7 @@ export function SettingsModal({
 
           <div className="mt-6 min-w-0">
             <div className="flex min-w-0 flex-nowrap items-center justify-between gap-3">
-              <p className="mono-caps min-w-0 shrink-0 whitespace-nowrap text-white/45">Camera</p>
+              <p className="mono-caps min-w-0 shrink-0 whitespace-nowrap text-white/62">Camera</p>
               <button
                 type="button"
                 onClick={() => void onRefreshVideoDevices()}
@@ -246,7 +246,7 @@ export function SettingsModal({
           </div>
 
           <div className="mt-6 min-w-0 pb-1">
-            <p className="mono-caps whitespace-nowrap text-white/45">WebSocket URL</p>
+            <p className="mono-caps whitespace-nowrap text-white/62">WebSocket URL</p>
             <input
               className="glass-input mt-2 w-full min-w-0 whitespace-nowrap px-3 py-2.5 font-mono text-[11px] sm:text-xs"
               value={wsUrl}

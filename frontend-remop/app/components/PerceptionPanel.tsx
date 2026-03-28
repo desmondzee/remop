@@ -55,7 +55,7 @@ export function PerceptionPanel({
       className={`min-w-0 flex-1 whitespace-nowrap rounded-md px-2 py-2 font-mono text-[10px] uppercase tracking-[0.1em] transition-colors sm:px-3 sm:text-[11px] sm:tracking-[0.12em] ${
         panelView === id
           ? "bg-white/[0.12] text-white/90 shadow-[0_1px_0_rgba(255,255,255,0.06)_inset]"
-          : "text-white/38 hover:bg-white/[0.05] hover:text-white/55"
+          : "text-white/55 hover:bg-white/[0.08] hover:text-white/72"
       }`}
     >
       {label}
@@ -70,7 +70,7 @@ export function PerceptionPanel({
 
       <div className="shrink-0 border-b border-white/8 px-3 py-2.5 sm:px-4 sm:py-3">
         <div
-          className="flex gap-0.5 rounded-xl border border-white/[0.07] bg-black/25 p-0.5"
+          className="flex gap-0.5 rounded-xl border border-white/[0.1] bg-black/40 p-0.5"
           role="tablist"
           aria-label="Panel view"
         >
@@ -83,7 +83,7 @@ export function PerceptionPanel({
         {panelView === "depth" ? (
           <section className="px-4 py-4 sm:px-5" role="tabpanel" aria-label="MiDaS depth">
             {!streaming ? (
-              <p className="text-center font-mono text-xs leading-relaxed text-white/35">
+              <p className="text-center font-mono text-xs leading-relaxed text-white/55">
                 Engage the camera to stream MiDaS depth.
               </p>
             ) : depthImgSrc ? (
@@ -100,21 +100,21 @@ export function PerceptionPanel({
                     }}
                   />
                 </div>
-                <p className="mono-caps mt-3 text-center text-[10px] text-white/32 sm:text-[11px]">
+                <p className="mono-caps mt-3 text-center text-[10px] text-white/48 sm:text-[11px]">
                   Raw depth · linear grayscale · per frame
                 </p>
               </>
             ) : depthPreviewError ? (
-              <div className="space-y-2 text-center font-mono text-xs leading-relaxed text-white/35">
+              <div className="space-y-2 text-center font-mono text-xs leading-relaxed text-white/55">
                 <p>Depth preview failed on the server.</p>
-                <p className="break-words rounded-lg bg-white/[0.06] px-2 py-2 text-left text-[11px] text-white/50">
+                <p className="break-words rounded-lg bg-white/[0.08] px-2 py-2 text-left text-[11px] text-white/70">
                   {depthPreviewError}
                 </p>
               </div>
             ) : (
-              <p className="text-center font-mono text-xs leading-relaxed text-white/35">
+              <p className="text-center font-mono text-xs leading-relaxed text-white/55">
                 Depth preview not in server response. Set{" "}
-                <code className="rounded bg-white/10 px-1 py-0.5 text-[10px] text-white/55">
+                <code className="rounded bg-white/12 px-1 py-0.5 text-[10px] text-white/72">
                   INCLUDE_DEPTH_PREVIEW=1
                 </code>{" "}
                 on the inference server (default on).
@@ -125,7 +125,7 @@ export function PerceptionPanel({
           <div role="tabpanel" aria-label="Objects and tracks">
             <section className="border-b border-white/8 px-4 py-4 sm:px-5">
               <h3
-                className="mono-caps text-white/50"
+                className="mono-caps text-white/68"
                 title="Detection ranked closest in depth (MiDaS-style relative z); bar shows model confidence."
               >
                 Nearest
@@ -147,7 +147,7 @@ export function PerceptionPanel({
                   </div>
                 </div>
               ) : (
-                <p className="mt-3 font-mono text-sm text-white/30">—</p>
+                <p className="mt-3 font-mono text-sm text-white/50">—</p>
               )}
             </section>
 
@@ -161,9 +161,9 @@ export function PerceptionPanel({
                 className="flex w-full flex-nowrap items-center justify-between gap-3 whitespace-nowrap rounded-lg border-0 bg-transparent py-2.5 text-left [-webkit-tap-highlight-color:transparent] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[var(--tw-accent)]/35 sm:py-3"
               >
                 <span className="flex min-w-0 items-baseline gap-2">
-                  <span className="mono-caps shrink-0 text-white/50">Tracks</span>
+                  <span className="mono-caps shrink-0 text-white/65">Tracks</span>
                   {tracks.length > 0 ? (
-                    <span className="font-mono text-[10px] tabular-nums text-white/30 sm:text-[11px]">
+                    <span className="font-mono text-[10px] tabular-nums text-white/52 sm:text-[11px]">
                       {tracks.length}
                     </span>
                   ) : null}
@@ -179,7 +179,7 @@ export function PerceptionPanel({
               {tracksOpen ? (
                 <div id="tracks-panel-region" className="mt-1 border-t border-white/[0.06] pt-3">
                   {tracks.length === 0 ? (
-                    <p className="font-mono text-sm text-white/30">—</p>
+                    <p className="font-mono text-sm text-white/50">—</p>
                   ) : (
                     <ul className="divide-y divide-white/[0.06] font-mono text-[13px]">
                       {tracks.map((d, i) => (

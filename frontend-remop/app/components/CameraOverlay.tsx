@@ -940,59 +940,9 @@ export default function CameraOverlay() {
             location={geoLabel}
           />
 
-          <div className="pointer-events-none absolute right-3 top-[max(0.45rem,env(safe-area-inset-top))] z-30 sm:right-4">
-            <button
-              type="button"
-              onClick={() => setSettingsModalOpen(true)}
-              className="pointer-events-auto rounded-lg border border-white/15 bg-black/40 px-3 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-white/70 backdrop-blur-md transition-colors hover:bg-black/55 hover:text-white/90"
-            >
-              Settings
-            </button>
-          </div>
-
           <div className="relative z-20 flex min-h-0 min-w-0 flex-1 flex-col pointer-events-none">
             <div className="pointer-events-none flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-x-clip px-3 pb-[calc(1.35rem+env(safe-area-inset-bottom))] pt-2 sm:px-4 sm:pb-[calc(1.5rem+env(safe-area-inset-bottom))] sm:pt-3 lg:flex-row lg:items-stretch lg:justify-end lg:gap-4 lg:px-5 lg:pt-4">
               <div className="relative flex min-h-0 min-w-0 flex-1 flex-col lg:block">
-                {streaming ? (
-                  <div className="pointer-events-auto mx-auto mt-auto max-h-[38vh] w-full max-w-xl overflow-y-auto rounded-xl border border-emerald-500/25 bg-emerald-950/75 p-3 shadow-lg backdrop-blur-md sm:max-h-[42vh] lg:mx-0 lg:mt-2 lg:max-w-md">
-                    <p className="mono-caps text-[10px] text-emerald-300/90">
-                      Agent
-                    </p>
-                    {agentNote ? (
-                      <p className="mt-2 font-mono text-xs text-amber-200/90">{agentNote}</p>
-                    ) : null}
-                    <p className="mt-2 text-sm font-semibold leading-snug text-emerald-50">
-                      {agentSay || "—"}
-                    </p>
-                    <div className="mt-3 rounded-lg border border-emerald-400/15 bg-black/25 p-2.5">
-                      <p className="font-mono text-[10px] text-emerald-200/80">
-                        anchor: {agentTaskAnchor ? `"${agentTaskAnchor}"` : "—"} · held:{" "}
-                        {agentInferredHeld ? `"${agentInferredHeld}"` : "—"}
-                      </p>
-                      {agentVoice ? (
-                        <ul className="mt-2 space-y-1 font-mono text-[10px] text-emerald-100/90">
-                          <li>phase: {agentVoice.phase}</li>
-                          <li>TTS: {agentInstruction.trim() || "—"}</li>
-                          <li>
-                            speak: {agentVoice.speak || "—"} · queue ~{ttsQueueLen}
-                          </li>
-                        </ul>
-                      ) : null}
-                    </div>
-                    {agentActions.length > 0 ? (
-                      <ul className="mt-2 space-y-1 font-mono text-[11px] text-emerald-100">
-                        {agentActions.map((a, i) => (
-                          <li key={`${a.name}-${i}`} className="rounded bg-black/20 px-2 py-1">
-                            <span className="font-semibold">{a.name}</span>
-                            {a.args && Object.keys(a.args).length > 0
-                              ? ` ${JSON.stringify(a.args)}`
-                              : ""}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : null}
-                  </div>
-                ) : null}
                 <div
                   className="pointer-events-none absolute left-2 top-2 hidden h-8 w-8 rounded-tl border-l-2 border-t-2 border-[rgba(59,158,255,0.35)] shadow-[0_0_24px_rgba(59,158,255,0.07)] lg:block"
                   aria-hidden
@@ -1028,6 +978,70 @@ export default function CameraOverlay() {
               </div>
             </div>
           </div>
+
+          {streaming ? (
+            <div
+              className="pointer-events-none absolute inset-x-0 bottom-0 z-[35] flex justify-center px-3 sm:px-4"
+              style={{
+                paddingBottom:
+                  "max(3.25rem, calc(env(safe-area-inset-bottom, 0px) + 2.75rem))",
+              }}
+            >
+              <div className="glass-panel pointer-events-auto max-h-[min(34vh,280px)] w-full min-w-0 max-w-lg overflow-y-auto overscroll-contain px-4 py-3 sm:px-5 sm:py-3.5">
+                <h2 className="mono-caps text-white/70">Agent</h2>
+                {agentNote ? (
+                  <p className="mt-2 font-mono text-xs leading-relaxed text-[var(--tw-warn)]/85">
+                    {agentNote}
+                  </p>
+                ) : null}
+                <p className="mt-2 text-base font-semibold leading-snug tracking-tight text-white sm:text-lg">
+                  {agentSay || "—"}
+                </p>
+                <div className="mt-3 border-t border-white/8 pt-3">
+                  <p className="font-mono text-[10px] leading-relaxed text-white/58 sm:text-[11px]">
+                    <span className="text-white/65">Anchor</span>{" "}
+                    {agentTaskAnchor ? `"${agentTaskAnchor}"` : "—"}
+                    <span className="text-white/42"> · </span>
+                    <span className="text-white/65">Held</span>{" "}
+                    {agentInferredHeld ? `"${agentInferredHeld}"` : "—"}
+                  </p>
+                  {agentVoice ? (
+                    <ul className="mt-2 space-y-1 font-mono text-[10px] text-white/58 sm:text-[11px]">
+                      <li>
+                        <span className="text-white/52">Phase</span>{" "}
+                        <span className="text-[var(--tw-accent)]/80">{agentVoice.phase}</span>
+                      </li>
+                      <li>
+                        <span className="text-white/52">TTS</span>{" "}
+                        {agentInstruction.trim() || "—"}
+                      </li>
+                      <li>
+                        <span className="text-white/52">Speak</span>{" "}
+                        {agentVoice.speak || "—"}
+                        <span className="text-white/42"> · </span>
+                        <span className="text-[var(--tw-teal)]/70">queue ~{ttsQueueLen}</span>
+                      </li>
+                    </ul>
+                  ) : null}
+                </div>
+                {agentActions.length > 0 ? (
+                  <ul className="mt-3 space-y-1.5 border-t border-white/8 pt-3 font-mono text-[11px] text-white/72 sm:text-[12px]">
+                    {agentActions.map((a, i) => (
+                      <li
+                        key={`${a.name}-${i}`}
+                        className="rounded-lg border border-white/[0.08] bg-black/38 px-2.5 py-1.5"
+                      >
+                        <span className="font-semibold text-[var(--tw-teal)]/85">{a.name}</span>
+                        {a.args && Object.keys(a.args).length > 0
+                          ? ` ${JSON.stringify(a.args)}`
+                          : ""}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
 
           <TwinStatusBar
             objects={detections.length}

@@ -31,9 +31,10 @@ export function TwinBrandHud({
       className={`pointer-events-none absolute left-0 top-0 z-[25] max-w-[min(calc(100vw-1.5rem),28rem)] pl-[max(0.65rem,env(safe-area-inset-left))] pt-[max(0.45rem,env(safe-area-inset-top))] ${className}`}
     >
       <div
-        className="inline-flex max-w-full items-center gap-2.5 rounded-full border border-[var(--tw-glass-border)] bg-[var(--tw-panel)] px-3.5 py-2 backdrop-blur-xl sm:gap-3 sm:px-4 sm:py-2.5"
+        className="inline-flex max-w-full items-center gap-2.5 rounded-full border border-[var(--tw-glass-border)] bg-[var(--tw-panel)] px-3.5 py-2 sm:gap-3 sm:px-4 sm:py-2.5"
         style={{
-          WebkitBackdropFilter: "blur(20px) saturate(1.35)",
+          backdropFilter: "blur(var(--tw-glass-blur)) saturate(1.2)",
+          WebkitBackdropFilter: "blur(var(--tw-glass-blur)) saturate(1.2)",
           boxShadow: `var(--tw-glass-elev-shadow)`,
         }}
       >
@@ -48,12 +49,12 @@ export function TwinBrandHud({
           className="min-w-0 truncate font-mono text-[9px] leading-snug sm:text-[10px]"
           title={fullTitle}
         >
-          <span className="max-w-[9rem] truncate text-white/52 sm:max-w-[12rem] sm:text-white/55">
+          <span className="max-w-[9rem] truncate text-white/72 sm:max-w-[12rem] sm:text-white/75">
             {location}
           </span>
-          <span className="text-white/25"> · </span>
-          <span className="tabular-nums text-white/58">{dateSegment}</span>
-          <span className="text-white/25"> · </span>
+          <span className="text-white/40"> · </span>
+          <span className="tabular-nums text-white/75">{dateSegment}</span>
+          <span className="text-white/40"> · </span>
           <span className="tabular-nums text-[var(--tw-accent)]/88">{time}</span>
         </p>
       </div>

@@ -15,7 +15,7 @@ function Pair({
   label,
   value,
   title,
-  valueClassName = "text-white/45",
+  valueClassName = "text-white/70",
   minCh,
 }: {
   label: string;
@@ -26,7 +26,7 @@ function Pair({
 }) {
   return (
     <span className="inline-flex items-baseline gap-1" title={title}>
-      <span className="font-mono text-[8px] uppercase tracking-[0.14em] text-white/28">
+      <span className="font-mono text-[8px] uppercase tracking-[0.14em] text-white/50">
         {label}
       </span>
       <span
@@ -59,10 +59,11 @@ export function TwinStatusBar({
       aria-label="Perception status"
     >
       <div
-        className="pointer-events-auto rounded-md border border-white/[0.04] bg-black/16 px-1.5 py-px backdrop-blur-[8px] sm:px-2 sm:py-0.5"
+        className="pointer-events-auto rounded-md border border-[var(--tw-glass-border)] bg-[var(--tw-panel)] px-1.5 py-px sm:px-2 sm:py-0.5"
         style={{
-          WebkitBackdropFilter: "blur(8px)",
-          boxShadow: `0 24px 48px -16px rgba(0,0,0,0.05)`,
+          backdropFilter: "blur(var(--tw-glass-blur)) saturate(1.2)",
+          WebkitBackdropFilter: "blur(var(--tw-glass-blur)) saturate(1.2)",
+          boxShadow: `var(--tw-glass-elev-shadow)`,
         }}
       >
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 sm:gap-x-3.5">
